@@ -217,12 +217,25 @@ impl Session {
             stop_tx.send(()).await.ok();
         });
 
+        let mut wait_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(100000000))); // Initial long sleep
+        let mut waiting_for_shutdown = false;
+        
+        let mut deadline_sleep = if let Some(d) = self.cli.deadline {
+            Box::pin(tokio::time::sleep(d))
+        } else {
+            Box::pin(tokio::time::sleep(Duration::from_secs(1000000000))) // Far future
+        };
+        let has_deadline = self.cli.deadline.is_some();
+
         loop {
             tokio::select! {
-                _ = interval.tick() => {
+                _ = interval.tick(), if !waiting_for_shutdown => {
                     if let Some(c) = count {
                         if seq > c {
-                            break; 
+                            waiting_for_shutdown = true;
+                            // Reset sleep to wait for stragglers
+                            wait_timeout = Box::pin(tokio::time::sleep(self.cli.timeout + Duration::from_millis(100)));
+                            continue;
                         }
                     }
                     
@@ -232,6 +245,14 @@ impl Session {
                         }
                     }
                     seq += 1;
+                }
+
+                _ = &mut deadline_sleep, if has_deadline => {
+                    break;
+                }
+
+                _ = &mut wait_timeout, if waiting_for_shutdown => {
+                    break;
                 }
 
                 Some(result) = rx.recv() => {
