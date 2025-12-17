@@ -10,6 +10,24 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 2. **Dual Stack**: Full support for IPv4, IPv6, and domain resolution.
 3. **Concurrency**: Probe multiple targets simultaneously.
 
+## Installation
+
+### Install with Cargo
+
+```shell
+cargo install pingx
+```
+
+### Linux ICMP Permission Setup
+
+On Linux systems, ICMP ping requires special permissions. After installation, run:
+
+```shell
+sudo setcap cap_net_raw+ep $(which pingx)
+```
+
+**Note**: The permissions will be lost if you reinstall or recompile pingx. You'll need to run the command again.
+
 ## Usage
 
 ### Basic Usage (ICMP)
@@ -89,6 +107,24 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 1. **多协议支持**: 支持 ICMP、TCP 和 HTTP 协议探测。
 2. **双栈支持**: 完美支持 IPv4、IPv6 地址及域名解析。
 3. **并发探测**: 支持同时对多个目标发起探测。
+
+## 安装
+
+### 使用 Cargo 安装
+
+```shell
+cargo install pingx
+```
+
+### Linux ICMP 权限设置
+
+在 Linux 系统上，ICMP ping 需要特殊权限。安装完成后，请运行：
+
+```shell
+sudo setcap cap_net_raw+ep $(which pingx)
+```
+
+**注意**：如果重新安装或重新编译 pingx，权限将会丢失，需要重新运行上述命令。
 
 ## 用法
 
