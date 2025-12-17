@@ -4,99 +4,92 @@ use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Mutex};
 
 pub struct HttpPinger {
+    target_name: String,
     target_url: Url,
-    target_ip: IpAddr, // For reporting
+    target_ip: IpAddr,
     client: Client,
-    timeout: Duration,
+    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl HttpPinger {
-    pub fn new(target_url: Url, target_ip: IpAddr, timeout: Duration) -> Self {
-        // We use a shared client but we could recreate it.
-        // Reusing connection (Keep-Alive) might affect latency measurement (make it lower).
-        // Usually "ping" implies new connection check?
-        // But http-ping usually checks service availability.
-        // Let's create one client.
+    pub fn new(target_name: String, target_url: Url, target_ip: IpAddr, timeout: Duration) -> Self {
         let client = Client::builder()
             .timeout(timeout)
-            .danger_accept_invalid_certs(true) // Should be configurable? Spec didn't say.
+            .danger_accept_invalid_certs(true)
             .build()
             .unwrap_or_else(|_| Client::new());
 
         Self {
+            target_name,
             target_url,
             target_ip,
             client,
-            timeout,
+            result_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Pinger for HttpPinger {
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
+        let mut guard = self.result_tx.lock().await;
+        *guard = Some(tx);
         Ok(())
     }
 
-    async fn ping(&mut self, seq: u64) -> Result<PingResult> {
-        let start = Instant::now();
+    async fn ping(&self, seq: u64) -> Result<()> {
+        let result_tx = {
+            let guard = self.result_tx.lock().await;
+            if guard.is_none() { return Ok(()); }
+            guard.clone().unwrap()
+        };
 
-        // Use HEAD request
-        let request = self.client.request(Method::HEAD, self.target_url.clone());
+        let target_name = self.target_name.clone();
+        let target_ip = self.target_ip;
+        let url = self.target_url.clone();
+        let client = self.client.clone();
 
-        match request.send().await {
-            Ok(response) => {
-                let rtt = start.elapsed();
-                let status = response.status();
-                let bytes = response.content_length().unwrap_or(0) as usize; // Usually 0 for HEAD but headers size?
+        tokio::spawn(async move {
+            let start = Instant::now();
+            let request = client.request(Method::HEAD, url);
 
-                if status.is_success() || status.is_redirection() {
-                    Ok(PingResult {
-                        target_addr: self.target_ip, // Reqwest resolves it, but we store the one we resolved earlier?
-                        // Actually reqwest does its own resolution.
-                        // But we return what we resolved for consistency in logs.
-                        seq,
-                        bytes, // Content length
-                        ttl: None,
-                        rtt,
-                        status: ProbeStatus::Success,
-                    })
-                } else {
-                    Ok(PingResult {
-                        target_addr: self.target_ip,
-                        seq,
-                        bytes: 0,
-                        ttl: None,
-                        rtt,
-                        status: ProbeStatus::Error(format!("HTTP {}", status)),
-                    })
+            let (status_res, rtt, bytes) = match request.send().await {
+                Ok(response) => {
+                    let rtt = start.elapsed();
+                    let status_code = response.status();
+                    let len = response.content_length().unwrap_or(0) as usize;
+                    if status_code.is_success() || status_code.is_redirection() {
+                        (ProbeStatus::Success, rtt, len)
+                    } else {
+                        (ProbeStatus::Error(format!("HTTP {}", status_code)), rtt, 0)
+                    }
+                },
+                Err(e) => {
+                    if e.is_timeout() {
+                        (ProbeStatus::Timeout, Duration::ZERO, 0)
+                    } else {
+                        (ProbeStatus::Error(e.to_string()), Duration::ZERO, 0)
+                    }
                 }
-            }
-            Err(e) => {
-                if e.is_timeout() {
-                    Ok(PingResult {
-                        target_addr: self.target_ip,
-                        seq,
-                        bytes: 0,
-                        ttl: None,
-                        rtt: Duration::ZERO,
-                        status: ProbeStatus::Timeout,
-                    })
-                } else {
-                    Ok(PingResult {
-                        target_addr: self.target_ip,
-                        seq,
-                        bytes: 0,
-                        ttl: None,
-                        rtt: Duration::ZERO,
-                        status: ProbeStatus::Error(e.to_string()),
-                    })
-                }
-            }
-        }
+            };
+
+            let _ = result_tx.send(PingResult {
+                target: target_name,
+                target_addr: target_ip,
+                seq,
+                bytes,
+                ttl: None,
+                rtt,
+                status: status_res,
+            }).await;
+        });
+
+        Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {

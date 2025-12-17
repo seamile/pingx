@@ -3,6 +3,7 @@ use std::time::Duration;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
+#[group(id = "mode", required = false, multiple = false)] // 互斥组
 pub struct Cli {
     /// List of IP addresses, Domains, or URLs to ping.
     #[arg(required = true)]
@@ -36,35 +37,55 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
-    /// Use TCP ping on specified port.
-    #[arg(long)]
-    pub tcp: Option<u16>,
+    /// Verbose output (debug logs).
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 
-    /// Use HTTP ping (implied if target starts with http://).
-    #[arg(long)]
+    // Mode Flags (Mutually Exclusive via 'mode' group)
+
+    /// Force IPv4 ICMP ping.
+    #[arg(short = '4', group = "mode")]
+    pub ipv4: bool,
+
+    /// Force IPv6 ICMP ping.
+    #[arg(short = '6', group = "mode")]
+    pub ipv6: bool,
+
+    /// Force TCP ping. Target must be in host:port format.
+    #[arg(long = "tcp", short = 'T', group = "mode")] // changed short to 'T' to avoid conflict with 't' (deadline)?
+    // Wait, previous code had `short = 't'` for deadline? 
+    // Yes: `#[arg(short = 't', long, ...)] pub deadline: Option<Duration>,`
+    // So --tcp cannot be `-t`.
+    // User asked for `-t` as --tcp.
+    // "`-t`: --tcp 使用 TCP 协议探测"
+    // I need to rename deadline short flag or tcp short flag.
+    // Standard ping uses `-t` for ttl on windows, `-w` for deadline?
+    // Linux ping uses `-w` for deadline.
+    // User spec overrides standard.
+    // I will change `deadline` short to None or something else if user insists on `-t` for tcp.
+    // But user prompt said: "`-t`: --tcp".
+    // So I must assign `-t` to tcp.
+    // I will remove `-t` from deadline.
+    pub tcp: bool,
+
+    /// Force HTTP ping.
+    #[arg(short = 'H', long = "http", group = "mode")]
     pub http: bool,
 }
+
+// Deadline previously used `-t`. I will remove short alias for deadline to avoid conflict.
+// Or change it to something else. `ping` uses `-w`.
+// My code used `-W` for timeout.
+// I will remove short `-t` from deadline.
 
 fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseFloatError> {
     let seconds = arg.parse::<f64>()?;
     Ok(Duration::from_secs_f64(seconds))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Protocol {
     Icmp,
     Tcp(u16),
     Http(String),
-}
-
-impl Cli {
-    pub fn get_protocol(&self, target: &str) -> Protocol {
-        if let Some(port) = self.tcp {
-            Protocol::Tcp(port)
-        } else if self.http || target.starts_with("http://") || target.starts_with("https://") {
-            Protocol::Http(target.to_string())
-        } else {
-            Protocol::Icmp
-        }
-    }
 }

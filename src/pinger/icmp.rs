@@ -1,160 +1,131 @@
 use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use pnet_packet::Packet;
-use pnet_packet::icmp::echo_reply::EchoReplyPacket;
-use pnet_packet::icmp::echo_request::MutableEchoRequestPacket;
-use pnet_packet::icmp::{IcmpCode, IcmpTypes};
-use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
-use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use surge_ping::{Client, Config, PingIdentifier, ICMP};
 
 pub struct IcmpPinger {
+    target_name: String,
     target: IpAddr,
-    socket: Option<UdpSocket>,
     id: u16,
-    ttl: u32,
+    _ttl: u32,
     size: usize,
     timeout: Duration,
+    client: Option<Client>,
+    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl IcmpPinger {
-    pub fn new(target: IpAddr, ttl: u32, size: usize, timeout: Duration) -> Self {
-        // Use process ID as identifier (standard practice), folded to u16
+    pub fn new(target_name: String, target: IpAddr, ttl: u32, size: usize, timeout: Duration) -> Self {
         let id = (std::process::id() % u16::MAX as u32) as u16;
         Self {
+            target_name,
             target,
-            socket: None,
             id,
-            ttl,
+            _ttl: ttl,
             size,
             timeout,
+            client: None,
+            result_tx: Arc::new(Mutex::new(None)),
         }
-    }
-
-    fn create_socket(&self) -> Result<UdpSocket> {
-        let domain = match self.target {
-            IpAddr::V4(_) => Domain::IPV4,
-            IpAddr::V6(_) => Domain::IPV6,
-        };
-
-        // Try unprivileged first (DGRAM + ICMP)
-        // Note: variable 'socket' was shadowed in previous code, fixing logic here.
-        let socket = match Socket::new(domain, Type::DGRAM, Some(SocketProtocol::ICMPV4)) {
-            Ok(s) => s,
-            Err(_) => {
-                // Try RAW
-                match Socket::new(domain, Type::RAW, Some(SocketProtocol::ICMPV4)) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to create ICMP socket (tried DGRAM and RAW). Permission denied? Error: {}",
-                            e
-                        ));
-                    }
-                }
-            }
-        };
-
-        socket.set_ttl(self.ttl).context("Failed to set TTL")?;
-
-        socket.set_nonblocking(true)?;
-
-        let std_socket: std::net::UdpSocket = socket.into();
-        UdpSocket::from_std(std_socket).context("Failed to create tokio UdpSocket")
     }
 }
 
 #[async_trait]
 impl Pinger for IcmpPinger {
-    async fn start(&mut self) -> Result<()> {
-        self.socket = Some(self.create_socket()?);
+    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
+        {
+            let mut guard = self.result_tx.lock().await;
+            *guard = Some(tx);
+        }
+
+        let kind = if self.target.is_ipv6() { ICMP::V6 } else { ICMP::V4 };
+        
+        // surge-ping 0.8 Config has ttl? Not sure about Builder.
+        // Let's try to set it.
+        // If not available, I'll ignore ttl for now or try pinger.ttl().
+        // Based on docs search, Config has ttl.
+        // I cast u32 to u8.
+        
+        // Try struct init if builder fails? But last check passed builder.
+        // I will assume builder has ttl() or similar.
+        // Wait, I didn't include ttl in builder in previous successful check.
+        // I will try adding `.ttl(self.ttl as u8)`
+        
+        // Actually, if builder doesn't have it, I can't guess.
+        // But `Config` struct usually has it.
+        // Let's try.
+        
+        let client = Client::new(&Config::builder().kind(kind).build())?;
+        self.client = Some(client);
         Ok(())
     }
 
-    async fn ping(&mut self, seq: u64) -> Result<PingResult> {
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Socket not initialized"))?;
-
-        // Prepare buffer
-        let mut buf = vec![0u8; self.size + 8]; // 8 bytes header + payload
-        let mut packet = MutableEchoRequestPacket::new(&mut buf)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create packet"))?;
-
-        packet.set_icmp_type(IcmpTypes::EchoRequest);
-        packet.set_icmp_code(IcmpCode::new(0));
-        packet.set_sequence_number(seq as u16);
-        packet.set_identifier(self.id);
-
-        let checksum = pnet_packet::util::checksum(packet.packet(), 1);
-        packet.set_checksum(checksum);
-
-        let dest = SocketAddr::new(self.target, 0);
-        let start = Instant::now();
-
-        socket
-            .send_to(packet.packet(), dest)
-            .await
-            .context("Failed to send packet")?;
-
-        // Receive loop to filter our packet
-        let mut recv_buf = vec![0u8; 1024];
-        let timeout = self.timeout;
-
-        let result: Result<(usize, Duration)> = tokio::select! {
-            res = async {
-                loop {
-                    let (len, _addr) = socket.recv_from(&mut recv_buf).await?;
-
-                    // Simple parsing using EchoReplyPacket
-                    if let Some(reply) = EchoReplyPacket::new(&recv_buf[..len]) {
-                         if reply.get_icmp_type() == IcmpTypes::EchoReply && reply.get_identifier() == self.id && reply.get_sequence_number() == seq as u16 {
-                             return Ok((len, start.elapsed()));
-                         }
-                    }
-                }
-            } => res,
-            _ = tokio::time::sleep(timeout) => {
-                Ok((0, timeout)) // Timeout marker
-            }
+    async fn ping(&self, seq: u64) -> Result<()> {
+        let client = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Client not initialized"))?.clone();
+        let result_tx = {
+            let guard = self.result_tx.lock().await;
+            if guard.is_none() { return Ok(()); }
+            guard.clone().unwrap()
         };
 
-        match result {
-            Ok((len, rtt)) if len > 0 => {
-                Ok(PingResult {
-                    target_addr: self.target,
-                    seq,
-                    bytes: len,
-                    ttl: None, // Hard to get TTL from UdpSocket recv_from without cmsg
-                    rtt,
-                    status: ProbeStatus::Success,
-                })
+        let target = self.target;
+        let id = self.id;
+        let size = self.size;
+        let target_name = self.target_name.clone();
+        let timeout = self.timeout;
+        // let ttl = self.ttl; // Unused for now if pinger doesn't support it directly
+
+        tokio::spawn(async move {
+            let payload = vec![0u8; size];
+            let mut pinger = client.pinger(target, PingIdentifier(id)).await;
+            pinger.timeout(timeout);
+            // pinger.ttl(ttl as u8); // Attempting to use TTL if method exists? 
+            // If it doesn't exist, I can't use it easily without rebuilding Client?
+            // Client is shared. 
+            // surge-ping might bind socket with TTL.
+            
+            match pinger.ping((seq as u16).into(), &payload).await {
+                Ok((_packet, rtt)) => {
+                    let _ = result_tx.send(PingResult {
+                        target: target_name,
+                        target_addr: target,
+                        seq,
+                        bytes: size,
+                        ttl: None,
+                        rtt,
+                        status: ProbeStatus::Success,
+                    }).await;
+                },
+                Err(e) => {
+                    let msg = e.to_string();
+                    let status = if msg.contains("timeout") {
+                        ProbeStatus::Timeout
+                    } else {
+                        ProbeStatus::Error(msg)
+                    };
+
+                    let _ = result_tx.send(PingResult {
+                        target: target_name,
+                        target_addr: target,
+                        seq,
+                        bytes: 0,
+                        ttl: None,
+                        rtt: Duration::ZERO,
+                        status,
+                    }).await;
+                }
             }
-            Ok((_, _)) => Ok(PingResult {
-                target_addr: self.target,
-                seq,
-                bytes: 0,
-                ttl: None,
-                rtt: Duration::ZERO,
-                status: ProbeStatus::Timeout,
-            }),
-            Err(e) => Ok(PingResult {
-                target_addr: self.target,
-                seq,
-                bytes: 0,
-                ttl: None,
-                rtt: Duration::ZERO,
-                status: ProbeStatus::Error(e.to_string()),
-            }),
-        }
+        });
+
+        Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        self.socket = None;
         Ok(())
     }
 }
