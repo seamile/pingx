@@ -1,6 +1,6 @@
 [package]
 name = "pingx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors     = ["Seamile <lanhuermao@gmail.com>"]
 license     = "MIT"
@@ -18,9 +18,10 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
-reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12.26", features = ["rustls-tls"], default-features = false }
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0.17"
 async-trait = "0.1"
 futures = "0.3"
 surge-ping = "0.8"
+colored = "3.0.0"

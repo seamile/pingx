@@ -5,6 +5,7 @@ use anyhow::Result;
 use tokio::signal;
 use std::collections::HashMap;
 use std::time::Duration;
+use colored::*;
 
 pub use self::models::{PingResult, ProbeStatus};
 
@@ -299,15 +300,20 @@ impl Session {
     }
 
     fn print_stats(stats: &models::PingStats) {
-        println!("\n--- {} ping statistics ---", stats.target);
+        // Title Blue
+        println!("\n{}", format!("--- {} ping statistics ---", stats.target).blue().bold());
         let loss = if stats.transmitted > 0 {
              100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
         } else { 0.0 };
 
         let total_time = stats.start_time.elapsed().as_millis();
 
-        println!("{} packets transmitted, {} received, {:.0}% packet loss, time {}ms", 
-            stats.transmitted, stats.received, loss, total_time);
+        // Loss Bold
+        println!("{} packets transmitted, {} received, {} packet loss, time {}ms", 
+            stats.transmitted, 
+            stats.received, 
+            format!("{:.0}%", loss).bold(), 
+            total_time);
         
         if stats.received > 0 {
             let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
@@ -320,7 +326,12 @@ impl Session {
                 .sum();
             let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
 
-            println!("rtt min/avg/max/mdev = {:.3}/{:.3}/{:.3}/{:.3} ms", min, avg, max, mdev);
+            // Avg Bold
+            println!("rtt min/avg/max/mdev = {:.3}/{}/{:.3}/{:.3} ms", 
+                min, 
+                format!("{:.3}", avg).bold(), 
+                max, 
+                mdev);
         }
     }
 }

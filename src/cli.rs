@@ -2,7 +2,7 @@ use clap::Parser;
 use std::time::Duration;
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "A versatile network diagnostic tool to replace system ping/ping6.", long_about = None)]
 pub struct Cli {
     /// List of IP addresses, Domains, or URLs to ping.
     #[arg(required = true)]
@@ -35,10 +35,6 @@ pub struct Cli {
     /// Quiet output. Nothing is displayed except the summary lines at startup time and when finished.
     #[arg(short = 'q', long)]
     pub quiet: bool,
-
-    /// Verbose output (debug logs).
-    #[arg(short = 'v', long)]
-    pub verbose: bool,
 
     // Mode Flags (Mutually Exclusive via 'mode' group)
 

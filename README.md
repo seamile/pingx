@@ -1,86 +1,158 @@
 # PingX
 
-PingX 是一个通用的网络诊断工具，可用于代替系统的 ping 和 ping6 命令。
+[🇬🇧 English](#pingx) ⇌ [🇨🇳 中文](#pingx-中文)
 
-## 特性
+PingX is a simple and practical network diagnostic tool designed to replace system `ping` and `ping6` commands. It supports **ICMP Ping**, **TCP Ping** (via SYN handshake), and **HTTP Ping** (via HEAD requests), allowing for comprehensive connectivity testing across IPv4 and IPv6.
 
-1. pingx 可以对 ipv4、ipv6 地址，以及域名进行诊断测试。
-2. 支持 ICMP、HTTP、TCP、UDP 协议。
-3. 可以并发对多个目标同时发起 ping。
+## Features
 
-## 用法
+1. **Multi-Protocol**: ICMP, TCP, and HTTP probing.
+2. **Dual Stack**: Full support for IPv4, IPv6, and domain resolution.
+3. **Concurrency**: Probe multiple targets simultaneously.
 
-### 直接 ping 一个目标
+## Usage
+
+### Basic Usage (ICMP)
 
 ```shell
-# ipv4
+# IPv4
 pingx 1.1.1.1
 
-# ipv6
+# IPv6
 pingx 2400:3200::1
 
-# domain
+# Domain (IPv6 preferred)
 pingx example.com
 ```
 
-ping 的结果与系统的 ping 命令保持一致：
+### Protocol Modes
+
+#### Auto-Detection Mode
+
+PingX automatically selects the protocol based on the target format:
+- Starts with `http://` or `https://`: Uses HTTP protocol.
+- Format `<host>:<port>`: Uses TCP protocol.
+- Others: Defaults to ICMP protocol.
 
 ```shell
-PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
-64 bytes from 1.1.1.1: icmp_seq=1 ttl=59 time=0.864 ms
-64 bytes from 1.1.1.1: icmp_seq=2 ttl=59 time=0.791 ms
-64 bytes from 1.1.1.1: icmp_seq=3 ttl=59 time=0.921 ms
-64 bytes from 1.1.1.1: icmp_seq=4 ttl=59 time=0.787 ms
-64 bytes from 1.1.1.1: icmp_seq=5 ttl=59 time=0.801 ms
-64 bytes from 1.1.1.1: icmp_seq=6 ttl=59 time=0.853 ms
-64 bytes from 1.1.1.1: icmp_seq=7 ttl=59 time=0.803 ms
-64 bytes from 1.1.1.1: icmp_seq=8 ttl=59 time=0.791 ms
-64 bytes from 1.1.1.1: icmp_seq=9 ttl=59 time=0.795 ms
-64 bytes from 1.1.1.1: icmp_seq=10 ttl=59 time=0.960 ms
+# Auto-detected as HTTP
+pingx https://www.google.com
 
---- 1.1.1.1 ping statistics ---
-10 packets transmitted, 10 received, 0% packet loss, time 1863ms
-rtt min/avg/max/mdev = 0.787/0.836/0.960/0.058 ms
+# Auto-detected as TCP (port 80)
+pingx 1.1.1.1:80
 ```
 
-### 多协议支持
+#### Forced Mode
 
-pingx 默认使用 ICMP 协议, 也可通过以下参数指定协议。
+Use flags to force specific protocols (target must match required format):
+
+- `-4`: Force IPv4 ICMP.
+- `-6`: Force IPv6 ICMP.
+- `-t` / `--tcp`: Force TCP protocol (Target must include port, e.g., `ip:port`).
+- `-H` / `--http`: Force HTTP protocol.
 
 ```shell
-# TCP
-pingx -t 8.8.8.8
+# Force IPv4
+pingx -4 example.com
 
-# UDP
-pingx -u 8.8.4.4
-
-# HTTP (通过协议头来识别，无需特殊参数)
-pingx http://example.com/
+# Force TCP
+pingx -t example.com:443
 ```
 
-### 并发探测多个目标
+### Concurrent Probing
 
-对多个目标发起探测时，自动转为安静模式，只展示对每一个目标最终的探测结果，而不再动态显示每次的探测状态。
+Supports probing multiple targets simultaneously. In multi-target mode, quiet mode (`-q`) is automatically enabled, showing only statistics at the end.
 
 ```shell
-pingx 8.8.8.8 2001:4860:4860::8888
-
---- 8.8.8.8 ping statistics ---
-10 packets transmitted, 10 received, 0% packet loss, time 1868ms
-rtt min/avg/max/mdev = 0.352/0.391/0.426/0.024 ms
-
---- 2001:4860:4860::8888 ping statistics ---
-10 packets transmitted, 10 received, 0% packet loss, time 1855ms
-rtt min/avg/max/mdev = 0.399/0.846/2.575/0.711 ms
+pingx 1.1.1.1 www.github.com
 ```
 
+### Common Options
 
-### 其他参数
+- `-c <COUNT>`: Stop after sending count packets.
+- `-i <INTERVAL>`: Wait interval seconds between sending each packet (default 1.0s).
+- `-w <DEADLINE>`: Stop running after deadline seconds.
+- `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
+- `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
+- `-q`: Quiet output. Only displays summary statistics.
 
-- `-i INTERVAL`: 发包间隔，默认1秒。
-- `-c COUNT`: 发包数量
-- `-t DEADLINE`: 持续运行时间
-- `-W TIMEOUT`: 等待响应的超时时间
-- `-q`: 安静模式。只显示最终统计结果，不会动态显示每个包的状态
+---
 
-未指定 `-c` 或 `-t` 参数时，会持续对目标进行探测，直至收到 INT (interrupt) 信号。如果 `-t` 与 `-c` 同时使用，任何一个目标达成，ping 就会停止。
+# PingX (中文)
+
+[🇨🇳 中文](#pingx-中文) ⇌ [🇬🇧 English](#pingx)
+
+PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 和 `ping6` 命令。它不仅支持标准的 **ICMP Ping**，还支持 **TCP Ping**（发送 SYN 握手报文）和 **HTTP Ping**（发送 HEAD 请求），可对 IPv4 和 IPv6 目标进行全面的连通性测试。
+
+## 特性
+
+1. **多协议支持**: 支持 ICMP、TCP 和 HTTP 协议探测。
+2. **双栈支持**: 完美支持 IPv4、IPv6 地址及域名解析。
+3. **并发探测**: 支持同时对多个目标发起探测。
+
+## 用法
+
+### 基础用法 (ICMP)
+
+```shell
+# IPv4
+pingx 1.1.1.1
+
+# IPv6
+pingx 2400:3200::1
+
+# 域名 (优先使用 IPv6)
+pingx example.com
+```
+
+### 指定协议模式
+
+#### 自动识别模式
+
+PingX 会根据目标格式自动选择协议：
+
+- `http://` 或 `https://` 开头：使用 HTTP 协议。
+- `<host>:<port>` 格式：使用 TCP 协议。
+- 其他：默认为 ICMP 协议。
+
+```shell
+# 自动识别为 HTTP
+pingx https://www.google.com
+
+# 自动识别为 TCP (端口 80)
+pingx 1.1.1.1:80
+```
+
+#### 强制模式
+
+使用参数强制指定协议（此时参数必须符合特定格式）：
+
+- `-4`: 强制使用 ICMP 协议检测 IPv4 目标。
+- `-6`: 强制使用 ICMP 协议检测 IPv6 目标。
+- `-t` / `--tcp`: 强制使用 TCP 协议 (目标必须包含端口，如 `ip:port`)。
+- `-H` / `--http`: 强制使用 HTTP 协议。
+
+```shell
+# 检测 IPv4
+pingx -4 example.com
+
+# 强制使用 TCP 协议
+pingx -t example.com:443
+```
+
+### 并发探测
+
+pingx 可以并发对多个目标以不同协议进行检测。多目标模式下会自动开启安静模式 (`-q`)，仅在结束时输出统计信息。
+
+```shell
+pingx 1.1.1.1 www.github.com
+```
+
+### 常用参数
+
+- `-c <COUNT>`: 发送数据包的数量。
+- `-i <INTERVAL>`: 发包间隔（秒），默认 1.0 秒。
+- `-w <DEADLINE>`: 持续运行的时间限制（秒）。
+- `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
+- `-s <SIZE>`: ICMP 数据包大小（默认 56 字节）。
+- `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。
