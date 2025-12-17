@@ -2,6 +2,14 @@
 name = "pingx"
 version = "0.1.0"
 edition = "2024"
+authors     = ["Seamile <lanhuermao@gmail.com>"]
+license     = "MIT"
+description = "一款简单实用的网络诊断工具，可用于代替系统的 ping 和 ping6 命令，支持 ICMP、TCP、HTTP 协议。"
+homepage    = "https://github.com/seamile/pingx"
+repository  = "https://github.com/seamile/pingx"
+keywords    = ["cli", "tool", "ping", "network"]
+categories  = ["command-line-utilities"]
+readme      = "README.md"
 
 [[bin]]
 name = "pingx"
