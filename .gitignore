@@ -16,10 +16,12 @@ debug
 # AI Tools
 .gemini/
 .geminiignore
+.kilocode/
 .specify/
 specs/
+openspec/
+AGENTS.md
 
 # Custom
 .DS_Store
 *.code-workspace
-AGENTS.md
