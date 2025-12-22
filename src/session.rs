@@ -301,7 +301,7 @@ impl Session {
 
     fn print_stats(stats: &models::PingStats) {
         // Title Blue
-        println!("\n{}", format!("--- {} ping statistics ---", stats.target).blue().bold());
+        println!("\n{}", format!("--- {} ping statistics ---", stats.target.bold()).blue());
         let loss = if stats.transmitted > 0 {
              100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
         } else { 0.0 };
