@@ -275,10 +275,24 @@ impl Session {
             p.stop().await.ok();
         }
 
+        // Collect table data and calculate global widths
+        let mut tables = Vec::new();
+        let mut global_widths = [0usize; 4];
+
         for target_host in targets {
             if let Some(stats) = all_stats.get(target_host) {
-                Self::print_stats(stats);
+                let table = Self::prepare_table_data(stats);
+                for i in 0..4 {
+                    let col_max = std::cmp::max(table.rows[0][i].len(), table.rows[1][i].len());
+                    global_widths[i] = std::cmp::max(global_widths[i], col_max);
+                }
+                tables.push((target_host.clone(), table));
             }
+        }
+
+        // Print all tables with global widths
+        for (target, table) in tables {
+            Self::render_table(&target, &table, &global_widths);
         }
 
         Ok(())
@@ -299,39 +313,85 @@ impl Session {
         }
     }
 
-    fn print_stats(stats: &models::PingStats) {
-        // Title Blue
-        println!("\n{}", format!("--- {} ping statistics ---", stats.target.bold()).blue());
+    fn prepare_table_data(stats: &models::PingStats) -> TableData {
         let loss = if stats.transmitted > 0 {
              100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
         } else { 0.0 };
 
         let total_time = stats.start_time.elapsed().as_millis();
 
-        // Loss Bold
-        println!("{} packets transmitted, {} received, {} packet loss, time {}ms", 
-            stats.transmitted, 
-            stats.received, 
-            format!("{:.0}%", loss).bold(), 
-            total_time);
-        
-        if stats.received > 0 {
-            let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
-            let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-            let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
-            
-            let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-            let sum_sq_diff: f64 = stats.rtts.iter() 
-                .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
-                .sum();
-            let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
+        let r1c1 = format!(" send: {}", stats.transmitted);
+        let r1c2 = format!("recv: {}", stats.received);
+        let r1c3 = format!("loss: {:.0} %", loss);
+        let r1c4 = format!("time: {} ms", total_time);
 
-            // Avg Bold
-            println!("rtt min/avg/max/mdev = {:.3}/{}/{:.3}/{:.3} ms", 
-                min, 
-                format!("{:.3}", avg).bold(), 
-                max, 
-                mdev);
+        let (min, max, avg, mdev) = if stats.received > 0 {
+             let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
+             let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
+             let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
+             
+             let avg_duration = Duration::from_secs_f64(avg / 1000.0);
+             let sum_sq_diff: f64 = stats.rtts.iter() 
+                 .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
+                 .sum();
+             let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
+             (
+                 format!("{:.3} ms", min),
+                 format!("{:.3} ms", max),
+                 format!("{:.3} ms", avg),
+                 format!("{:.3} ms", mdev)
+             )
+        } else {
+             (String::from("-"), String::from("-"), String::from("-"), String::from("-"))
+        };
+
+        let r2c1 = format!("  min: {}", min);
+        let r2c2 = format!(" max: {}", max);
+        let r2c3 = format!(" avg: {}", avg);
+        let r2c4 = format!("mdev: {}", mdev);
+
+        TableData {
+            rows: [
+                [r1c1, r1c2, r1c3, r1c4],
+                [r2c1, r2c2, r2c3, r2c4],
+            ]
         }
     }
+
+    fn render_table(target: &str, table: &TableData, widths: &[usize; 4]) {
+        let sep = " | ";
+        let sep_len = 3;
+        let total_width = widths.iter().sum::<usize>() + (sep_len * 3);
+
+        let title_clean = format!("=== {} ping statistics ===", target);
+        let padding = if total_width > title_clean.len() {
+            (total_width - title_clean.len()) / 2
+        } else {
+            0
+        };
+
+        println!("\n{:padding$}{}", "", format!("=== {} ping statistics ===", target.bold()).blue(), padding=padding);
+
+        // Row 1
+        print!("{:width$}", table.rows[0][0], width=widths[0]);
+        print!("{}", sep);
+        print!("{:width$}", table.rows[0][1], width=widths[1]);
+        print!("{}", sep);
+        print!("{}", format!("{:width$}", table.rows[0][2], width=widths[2]).bold());
+        print!("{}", sep);
+        println!("{:width$}", table.rows[0][3], width=widths[3]);
+
+        // Row 2
+        print!("{:width$}", table.rows[1][0], width=widths[0]);
+        print!("{}", sep);
+        print!("{:width$}", table.rows[1][1], width=widths[1]);
+        print!("{}", sep);
+        print!("{}", format!("{:width$}", table.rows[1][2], width=widths[2]).bold());
+        print!("{}", sep);
+        println!("{:width$}", table.rows[1][3], width=widths[3]);
+    }
+}
+
+struct TableData {
+    rows: [[String; 4]; 2],
 }
