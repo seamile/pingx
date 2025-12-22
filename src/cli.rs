@@ -9,27 +9,27 @@ pub struct Cli {
     pub targets: Vec<String>,
 
     /// Stop after sending N packets.
-    #[arg(short = 'c', long)]
+    #[arg(short = 'c', long, overrides_with = "count")]
     pub count: Option<u64>,
 
     /// Wait N seconds between sending each packet.
-    #[arg(short = 'i', long, default_value = "1.0", value_parser = parse_duration)]
+    #[arg(short = 'i', long, default_value = "1.0", value_parser = parse_duration, overrides_with = "interval")]
     pub interval: Duration,
 
     /// Time to wait for a response, in seconds.
-    #[arg(short = 'W', long, default_value = "1.0", value_parser = parse_duration)]
+    #[arg(short = 'W', long, default_value = "1.0", value_parser = parse_duration, overrides_with = "timeout")]
     pub timeout: Duration,
 
     /// Stop running after N seconds.
-    #[arg(short = 'w', long, value_parser = parse_duration)]
+    #[arg(short = 'w', long, value_parser = parse_duration, overrides_with = "deadline")]
     pub deadline: Option<Duration>,
 
     /// Set the IP Time to Live.
-    #[arg(long, default_value = "64")]
+    #[arg(long, default_value = "64", overrides_with = "ttl")]
     pub ttl: u32,
 
     /// Size of payload in bytes.
-    #[arg(short = 's', long, default_value = "56")]
+    #[arg(short = 's', long, default_value = "56", overrides_with = "size")]
     pub size: usize,
 
     /// Quiet output. Nothing is displayed except the summary lines at startup time and when finished.
