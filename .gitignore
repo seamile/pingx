@@ -21,6 +21,7 @@ debug
 specs/
 openspec/
 AGENTS.md
+GEMINI.md
 
 # Custom
 .DS_Store
