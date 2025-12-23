@@ -34,7 +34,7 @@ mod models {
 
     #[derive(Debug, Clone)]
     pub struct PingStats {
-        pub target: String,
+        pub _target: String,
         pub _address: IpAddr,
         pub transmitted: u64,
         pub received: u64,
@@ -45,7 +45,7 @@ mod models {
     impl PingStats {
         pub fn new(target: String, address: IpAddr) -> Self {
             Self {
-                target,
+                _target: target,
                 _address: address,
                 transmitted: 0,
                 received: 0,
@@ -85,7 +85,7 @@ impl Session {
                  } else {
                      host
                  };
-                 
+
                  if let Ok(port) = port_str.parse::<u16>() {
                      return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
                  }
@@ -121,7 +121,7 @@ impl Session {
                      // It's a plain IPv6 address, so ICMP
                      return Ok((crate::cli::Protocol::Icmp, target.to_string()));
                  }
-                 
+
                  // Also check IPv4 just in case
                  if target.parse::<std::net::Ipv4Addr>().is_ok() {
                      return Ok((crate::cli::Protocol::Icmp, target.to_string()));
@@ -132,7 +132,7 @@ impl Session {
                  } else {
                      host
                  };
-                 
+
                  return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
              }
         }
@@ -173,20 +173,20 @@ impl Session {
             match resolve_host(&host_to_resolve, ip_version).await {
                 Ok(target_addr) => {
                      all_stats.insert(target_string.clone(), models::PingStats::new(target_string.clone(), target_addr));
-                     
+
                      if !quiet {
                          println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
                      }
 
                      let mut pinger = crate::pinger::create_pinger(
                          target_string.clone(),
-                         protocol, 
-                         target_addr, 
-                         self.cli.ttl, 
-                         self.cli.size, 
+                         protocol,
+                         target_addr,
+                         self.cli.ttl,
+                         self.cli.size,
                          self.cli.timeout
                      );
-                     
+
                      if let Err(e) = pinger.start(tx.clone()).await {
                          eprintln!("Failed to start pinger for {}: {}", target_string, e);
                          continue;
@@ -205,7 +205,7 @@ impl Session {
         drop(tx);
 
         if pingers.is_empty() {
-            return Ok(()); 
+            return Ok(());
         }
 
         let mut interval = tokio::time::interval(self.cli.interval);
@@ -220,7 +220,7 @@ impl Session {
 
         let mut wait_timeout = Box::pin(tokio::time::sleep(Duration::from_secs(100000000))); // Initial long sleep
         let mut waiting_for_shutdown = false;
-        
+
         let mut deadline_sleep = if let Some(d) = self.cli.deadline {
             Box::pin(tokio::time::sleep(d))
         } else {
@@ -239,7 +239,7 @@ impl Session {
                             continue;
                         }
                     }
-                    
+
                     for pinger in &pingers {
                         if let Err(e) = pinger.ping(seq).await {
                             eprintln!("Failed to ping: {}", e);
@@ -301,7 +301,7 @@ impl Session {
     fn print_result(result: &models::PingResult) {
         match &result.status {
             models::ProbeStatus::Success => {
-                println!("{} bytes from {}: icmp_seq={} ttl={:?} time={:.3} ms", 
+                println!("{} bytes from {}: icmp_seq={} ttl={:?} time={:.3} ms",
                     result.bytes, result.target_addr, result.seq, result.ttl.unwrap_or(0), result.rtt.as_secs_f64() * 1000.0);
             },
             models::ProbeStatus::Timeout => {
@@ -329,9 +329,9 @@ impl Session {
              let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
              let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
              let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
-             
+
              let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-             let sum_sq_diff: f64 = stats.rtts.iter() 
+             let sum_sq_diff: f64 = stats.rtts.iter()
                  .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
                  .sum();
              let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;

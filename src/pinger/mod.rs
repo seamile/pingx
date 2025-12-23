@@ -19,10 +19,10 @@ pub trait Pinger: Send + Sync {
 
 pub fn create_pinger(
     target_name: String, // Added
-    protocol: Protocol, 
-    target: IpAddr, 
-    ttl: u32, 
-    size: usize, 
+    protocol: Protocol,
+    target: IpAddr,
+    ttl: u32,
+    size: usize,
     timeout: Duration
 ) -> Box<dyn Pinger> {
     match protocol {
