@@ -1,10 +1,10 @@
 [package]
 name = "pingx"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors     = ["Seamile <lanhuermao@gmail.com>"]
 license     = "MIT"
-description = "一款简单实用的网络诊断工具，可用于代替系统的 ping 和 ping6 命令，支持 ICMP、TCP、HTTP 协议。"
+description = "A efficient network diagnostic tool to replace system ping/ping6, supporting multi-target concurrent probing via ICMP, TCP, and HTTP."
 homepage    = "https://github.com/seamile/pingx"
 repository  = "https://github.com/seamile/pingx"
 keywords    = ["cli", "tool", "ping", "network"]

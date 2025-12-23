@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use std::net::IpAddr;
 use tokio::net::lookup_host;
-use colored::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IpVersion {
