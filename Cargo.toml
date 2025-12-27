@@ -1,6 +1,6 @@
 [package]
 name = "pingx"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 authors     = ["Seamile <lanhuermao@gmail.com>"]
 license     = "MIT"
@@ -25,3 +25,10 @@ async-trait = "0.1"
 futures = "0.3"
 surge-ping = "0.8"
 colored = "3.0.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
