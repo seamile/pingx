@@ -144,7 +144,7 @@ impl Session {
     pub async fn run(&self) -> Result<()> {
         let targets = &self.cli.targets;
         let multi_target = targets.len() > 1;
-        let quiet = self.cli.quiet || multi_target;
+        let quiet = self.cli.quiet;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<models::PingResult>(100);
 
@@ -174,9 +174,7 @@ impl Session {
                 Ok(target_addr) => {
                      all_stats.insert(target_string.clone(), models::PingStats::new(target_string.clone(), target_addr));
 
-                     if !quiet {
-                         println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
-                     }
+                     println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
 
                      let mut pinger = crate::pinger::create_pinger(
                          target_string.clone(),
