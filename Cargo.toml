@@ -23,7 +23,7 @@ anyhow = "1.0"
 thiserror = "2.0.17"
 async-trait = "0.1"
 futures = "0.3"
-surge-ping = "0.8"
+surge-ping = "=0.8.3"
 colored = "3.0.0"
 
 [profile.release]
