@@ -235,12 +235,15 @@ impl Session {
         };
         let has_deadline = self.cli.deadline.is_some();
 
+        let mut inflight_packets = 0;
+
         loop {
             tokio::select! {
                 _ = interval.tick(), if !waiting_for_shutdown => {
                     if let Some(c) = count {
                         if seq > c {
                             waiting_for_shutdown = true;
+                            if inflight_packets == 0 { break; }
                             // Reset sleep to wait for stragglers
                             wait_timeout = Box::pin(tokio::time::sleep(self.cli.timeout + Duration::from_millis(100)));
                             continue;
@@ -250,6 +253,8 @@ impl Session {
                     for pinger in &pingers {
                         if let Err(e) = pinger.ping(seq).await {
                             eprintln!("Failed to ping: {}", e);
+                        } else {
+                            inflight_packets += 1;
                         }
                     }
                     seq += 1;
@@ -264,11 +269,17 @@ impl Session {
                 }
 
                 Some(result) = rx.recv() => {
+                    if inflight_packets > 0 { inflight_packets -= 1; }
+
                     if let Some(stats) = all_stats.get_mut(&result.target) {
                         stats.update(&result);
                     }
                     if !quiet {
                         Self::print_result(&result);
+                    }
+
+                    if waiting_for_shutdown && inflight_packets == 0 {
+                        break;
                     }
                 }
 
