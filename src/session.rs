@@ -171,7 +171,16 @@ impl Session {
             };
 
             match resolve_host(&host_to_resolve, ip_version).await {
-                Ok(target_addr) => {
+                Ok(addrs) => {
+                     let target_addr = match crate::happy_eyeballs::select_best_addr(addrs, &protocol).await {
+                         Ok(addr) => addr,
+                         Err(e) => {
+                             eprintln!("pingx: {}: {}", target_string, e);
+                             if !multi_target { return Err(e); }
+                             continue;
+                         }
+                     };
+
                      all_stats.insert(target_string.clone(), models::PingStats::new(target_string.clone(), target_addr));
 
                      println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
@@ -299,8 +308,13 @@ impl Session {
     fn print_result(result: &models::PingResult) {
         match &result.status {
             models::ProbeStatus::Success => {
-                println!("{} bytes from {}: icmp_seq={} ttl={:?} time={:.3} ms",
-                    result.bytes, result.target_addr, result.seq, result.ttl.unwrap_or(0), result.rtt.as_secs_f64() * 1000.0);
+                let ttl_str = if let Some(ttl) = result.ttl {
+                    format!(" ttl={}", ttl)
+                } else {
+                    "".to_string()
+                };
+                println!("{} bytes from {}: icmp_seq={}{} time={:.3} ms",
+                    result.bytes, result.target_addr, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
             },
             models::ProbeStatus::Timeout => {
                 println!("Request timeout for icmp_seq={}", result.seq);

@@ -2,6 +2,7 @@ mod cli;
 mod pinger;
 mod session;
 mod utils;
+mod happy_eyeballs;
 
 use clap::Parser;
 use cli::Cli;

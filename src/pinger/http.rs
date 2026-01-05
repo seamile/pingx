@@ -3,7 +3,7 @@ use crate::session::{PingResult, ProbeStatus};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -18,10 +18,16 @@ pub struct HttpPinger {
 
 impl HttpPinger {
     pub fn new(target_name: String, target_url: Url, target_ip: IpAddr, timeout: Duration) -> Self {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(timeout)
-            .danger_accept_invalid_certs(true)
-            .build()
+            .danger_accept_invalid_certs(true);
+
+        if let Some(host) = target_url.host_str() {
+             let port = target_url.port_or_known_default().unwrap_or(80);
+             builder = builder.resolve(host, SocketAddr::new(target_ip, port));
+        }
+
+        let client = builder.build()
             .unwrap_or_else(|_| Client::new());
 
         Self {
