@@ -52,6 +52,19 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
     use surge_ping::{Client, Config, ICMP};
     use std::io::{self, Write};
     
+    // Helper to detect Chinese locale
+    fn is_chinese_locale() -> bool {
+        let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
+        for var in vars {
+            if let Ok(val) = std::env::var(var) {
+                if val.to_lowercase().contains("zh") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // Try to create an ICMPv4 Client to check permissions
     let config = Config::builder().kind(ICMP::V4).build();
     match Client::new(&config) {
@@ -64,8 +77,15 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
         }
     };
 
-    println!("{}", format!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold()).yellow());
-    println!("Grant this permission now via sudo? (One-time setup)");
+    let is_zh = is_chinese_locale();
+
+    if is_zh {
+        println!("{}", format!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold()).yellow());
+        println!("是否立即通过 sudo 授予此权限？（一次性设置）");
+    } else {
+        println!("{}", format!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold()).yellow());
+        println!("Grant this permission now via sudo? (One-time setup)");
+    }
     println!();
     
     let current_exe = std::env::current_exe()?;
@@ -73,7 +93,12 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
     
     println!("{}", format!("  sudo setcap cap_net_raw+ep {}", exe_path).yellow());
     println!();
-    print!("Proceed? [Y/n]: ");
+    
+    if is_zh {
+        print!("继续？ [Y/n]: ");
+    } else {
+        print!("Proceed? [Y/n]: ");
+    }
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -81,7 +106,8 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
     let input = input.trim().to_lowercase();
 
     if input != "y" && input != "" && input != "yes" {
-        return Err(anyhow::anyhow!("Operation cancelled by user"));
+        let msg = if is_zh { "用户取消操作" } else { "Operation cancelled by user" };
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
     let status = Command::new("sudo")
@@ -92,10 +118,15 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
         .context("Failed to execute sudo")?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Authorization failed"));
+        let msg = if is_zh { "授权失败" } else { "Authorization failed" };
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
-    println!("Authorization successful! Restarting...");
+    if is_zh {
+        println!("授权成功！正在重启...");
+    } else {
+        println!("Authorization successful! Restarting...");
+    }
     println!("--------------------------------------------------");
 
     // Get current arguments and restart process

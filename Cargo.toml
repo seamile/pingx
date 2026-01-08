@@ -7,7 +7,7 @@ license     = "MIT"
 description = "A efficient network diagnostic tool to replace system ping/ping6, supporting multi-target concurrent probing via ICMP, TCP, and HTTP."
 homepage    = "https://github.com/seamile/pingx"
 repository  = "https://github.com/seamile/pingx"
-keywords    = ["cli", "tool", "ping", "network"]
+keywords    = ["ping", "tcp-ping", "http-ping", "cli", "tool", "network"]
 categories  = ["command-line-utilities"]
 readme      = "README.md"
 
