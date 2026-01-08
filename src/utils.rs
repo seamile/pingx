@@ -51,7 +51,7 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
     use std::os::unix::process::CommandExt;
     use surge_ping::{Client, Config, ICMP};
     use std::io::{self, Write};
-    
+
     // Helper to detect Chinese locale
     fn is_chinese_locale() -> bool {
         let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
@@ -80,20 +80,20 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
     let is_zh = is_chinese_locale();
 
     if is_zh {
-        println!("{}", format!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold()).yellow());
+        println!("{}", format!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold()));
         println!("是否立即通过 sudo 授予此权限？（一次性设置）");
     } else {
-        println!("{}", format!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold()).yellow());
+        println!("{}", format!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold()));
         println!("Grant this permission now via sudo? (One-time setup)");
     }
     println!();
-    
+
     let current_exe = std::env::current_exe()?;
     let exe_path = current_exe.to_string_lossy();
-    
+
     println!("{}", format!("  sudo setcap cap_net_raw+ep {}", exe_path).yellow());
     println!();
-    
+
     if is_zh {
         print!("继续？ [Y/n]: ");
     } else {
