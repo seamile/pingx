@@ -293,16 +293,19 @@ impl Session {
             p.stop().await.ok();
         }
 
-        // Collect table data and calculate global widths
+        // Collect table data and calculate global column widths
         let mut tables = Vec::new();
-        let mut global_widths = [0usize; 4];
+        let mut global_key_widths = [0usize; 3];
+        let mut global_val_widths = [0usize; 3];
 
         for target_host in targets {
             if let Some(stats) = all_stats.get(target_host) {
                 let table = Self::prepare_table_data(stats);
-                for i in 0..4 {
-                    let col_max = std::cmp::max(table.rows[0][i].len(), table.rows[1][i].len());
-                    global_widths[i] = std::cmp::max(global_widths[i], col_max);
+                for r in 0..3 {
+                    for c in 0..3 {
+                        global_key_widths[c] = std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
+                        global_val_widths[c] = std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
+                    }
                 }
                 tables.push((target_host.clone(), table));
             }
@@ -310,7 +313,7 @@ impl Session {
 
         // Print all tables with global widths
         for (target, table) in tables {
-            Self::render_table(&target, &table, &global_widths);
+            Self::render_table(&target, &table, &global_key_widths, &global_val_widths);
         }
 
         Ok(())
@@ -343,12 +346,7 @@ impl Session {
 
         let total_time = stats.start_time.elapsed().as_millis();
 
-        let r1c1 = format!(" send: {}", stats.transmitted);
-        let r1c2 = format!("recv: {}", stats.received);
-        let r1c3 = format!("loss: {:.0} %", loss);
-        let r1c4 = format!("time: {} ms", total_time);
-
-        let (min, max, avg, mdev) = if stats.received > 0 {
+        let (min, max, avg, mdev, jitter) = if stats.received > 0 {
              let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
              let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
              let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
@@ -358,33 +356,55 @@ impl Session {
                  .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
                  .sum();
              let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
+
+             let jitter = if stats.rtts.len() > 1 {
+                 let sum_diff: f64 = stats.rtts.windows(2)
+                     .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
+                     .sum();
+                 sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
+             } else {
+                 0.0
+             };
+
              (
                  format!("{:.3} ms", min),
                  format!("{:.3} ms", max),
                  format!("{:.3} ms", avg),
-                 format!("{:.3} ms", mdev)
+                 format!("{:.3} ms", mdev),
+                 format!("{:.3} ms", jitter)
              )
         } else {
-             (String::from("-"), String::from("-"), String::from("-"), String::from("-"))
+             (String::from("-"), String::from("-"), String::from("-"), String::from("-"), String::from("-"))
         };
-
-        let r2c1 = format!("  min: {}", min);
-        let r2c2 = format!(" max: {}", max);
-        let r2c3 = format!(" avg: {}", avg);
-        let r2c4 = format!("mdev: {}", mdev);
 
         TableData {
             rows: [
-                [r1c1, r1c2, r1c3, r1c4],
-                [r2c1, r2c2, r2c3, r2c4],
+                [
+                    Cell { key: "send:".to_string(), val: format!("{}", stats.transmitted) },
+                    Cell { key: "min:".to_string(),  val: min },
+                    Cell { key: "time:".to_string(), val: format!("{} ms", total_time) },
+                ],
+                [
+                    Cell { key: "recv:".to_string(), val: format!("{}", stats.received) },
+                    Cell { key: "max:".to_string(),  val: max },
+                    Cell { key: "jitter:".to_string(), val: jitter },
+                ],
+                [
+                    Cell { key: "loss:".to_string(), val: format!("{:.0} %", loss) },
+                    Cell { key: "avg:".to_string(),  val: avg },
+                    Cell { key: "mdev:".to_string(), val: mdev },
+                ],
             ]
         }
     }
 
-    fn render_table(target: &str, table: &TableData, widths: &[usize; 4]) {
+    fn render_table(target: &str, table: &TableData, k_widths: &[usize; 3], v_widths: &[usize; 3]) {
         let sep = " | ";
-        let sep_len = 3;
-        let total_width = widths.iter().sum::<usize>() + (sep_len * 3);
+        
+        // Calculate total width for centering title
+        // Each column is k_width + 1 (space) + v_width
+        let col_widths: Vec<usize> = (0..3).map(|i| k_widths[i] + 1 + v_widths[i]).collect();
+        let total_width = col_widths.iter().sum::<usize>() + (sep.len() * 2);
 
         let title_clean = format!("=== {} ping statistics ===", target);
         let padding = if total_width > title_clean.len() {
@@ -395,26 +415,33 @@ impl Session {
 
         println!("\n{:padding$}{}", "", format!("=== {} ping statistics ===", target.bold()).blue(), padding=padding);
 
-        // Row 1
-        print!("{:width$}", table.rows[0][0], width=widths[0]);
-        print!("{}", sep);
-        print!("{:width$}", table.rows[0][1], width=widths[1]);
-        print!("{}", sep);
-        print!("{}", format!("{:width$}", table.rows[0][2], width=widths[2]).bold());
-        print!("{}", sep);
-        println!("{:width$}", table.rows[0][3], width=widths[3]);
+        for (r_idx, row) in table.rows.iter().enumerate() {
+            let is_last_row = r_idx == 2;
+            let mut line = String::new();
 
-        // Row 2
-        print!("{:width$}", table.rows[1][0], width=widths[0]);
-        print!("{}", sep);
-        print!("{:width$}", table.rows[1][1], width=widths[1]);
-        print!("{}", sep);
-        print!("{}", format!("{:width$}", table.rows[1][2], width=widths[2]).bold());
-        print!("{}", sep);
-        println!("{:width$}", table.rows[1][3], width=widths[3]);
+            for (c_idx, cell) in row.iter().enumerate() {
+                let cell_str = format!("{:>kw$} {:>vw$}", cell.key, cell.val, kw=k_widths[c_idx], vw=v_widths[c_idx]);
+                
+                if is_last_row {
+                    line.push_str(&cell_str.bold().to_string());
+                } else {
+                    line.push_str(&cell_str);
+                }
+
+                if c_idx < 2 {
+                    line.push_str(sep);
+                }
+            }
+            println!("{}", line);
+        }
     }
 }
 
+struct Cell {
+    key: String,
+    val: String,
+}
+
 struct TableData {
-    rows: [[String; 4]; 2],
+    rows: [[Cell; 3]; 3],
 }
