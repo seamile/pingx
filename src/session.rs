@@ -149,6 +149,7 @@ impl Session {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<models::PingResult>(100);
 
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
+        let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
 
         for target_string in targets {
@@ -161,6 +162,8 @@ impl Session {
                     continue;
                 }
             };
+            
+            target_protocols.insert(target_string.clone(), protocol.clone());
 
             let ip_version = if self.cli.ipv4 {
                 IpVersion::V4
@@ -275,7 +278,8 @@ impl Session {
                         stats.update(&result);
                     }
                     if !quiet {
-                        Self::print_result(&result);
+                        let protocol = target_protocols.get(&result.target).unwrap_or(&crate::cli::Protocol::Icmp);
+                        Self::print_result(&result, protocol);
                     }
 
                     if waiting_for_shutdown && inflight_packets == 0 {
@@ -319,7 +323,13 @@ impl Session {
         Ok(())
     }
 
-    fn print_result(result: &models::PingResult) {
+    fn print_result(result: &models::PingResult, protocol: &crate::cli::Protocol) {
+        let seq_prefix = match protocol {
+            crate::cli::Protocol::Icmp => "icmp_seq",
+            crate::cli::Protocol::Tcp(_) => "tcp_seq",
+            crate::cli::Protocol::Http(_) => "http_seq",
+        };
+
         match &result.status {
             models::ProbeStatus::Success => {
                 let ttl_str = if let Some(ttl) = result.ttl {
@@ -327,14 +337,14 @@ impl Session {
                 } else {
                     "".to_string()
                 };
-                println!("{} bytes from {}: icmp_seq={}{} time={:.3} ms",
-                    result.bytes, result.target_addr, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
+                println!("{} bytes from {}: {}={}{} time={:.3} ms",
+                    result.bytes, result.target_addr, seq_prefix, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
             },
             models::ProbeStatus::Timeout => {
-                println!("Request timeout for icmp_seq={}", result.seq);
+                println!("Request timeout for {}={}", seq_prefix, result.seq);
             },
             models::ProbeStatus::Error(e) => {
-                eprintln!("Error for icmp_seq={}: {}", result.seq, e);
+                eprintln!("Error for {}={}: {}", seq_prefix, result.seq, e);
             }
         }
     }
