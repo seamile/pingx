@@ -337,8 +337,17 @@ impl Session {
                 } else {
                     "".to_string()
                 };
-                println!("{} bytes from {}: {}={}{} time={:.3} ms",
-                    result.bytes, result.target_addr, seq_prefix, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
+
+                match protocol {
+                    crate::cli::Protocol::Icmp => {
+                        println!("{} bytes from {}: {}={}{} time={:.3} ms",
+                            result.bytes, result.target_addr, seq_prefix, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
+                    },
+                    _ => {
+                        println!("from {}: {}={} time={:.3} ms",
+                            result.target_addr, seq_prefix, result.seq, result.rtt.as_secs_f64() * 1000.0);
+                    }
+                }
             },
             models::ProbeStatus::Timeout => {
                 println!("Request timeout for {}={}", seq_prefix, result.seq);
