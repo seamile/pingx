@@ -12,7 +12,7 @@ use session::Session;
 async fn main() {
     let args = Cli::parse();
 
-    if let Err(e) = utils::check_and_acquire_privileges().await {
+    if let Err(e) = utils::check_and_acquire_privileges(&args).await {
         eprintln!("pingx: {}", e);
         std::process::exit(1);
     }

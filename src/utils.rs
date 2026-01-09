@@ -46,7 +46,11 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
 }
 
 #[cfg(target_os = "linux")]
-pub async fn check_and_acquire_privileges() -> Result<()> {
+pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
+    if cli.tcp || cli.http {
+        return Ok(());
+    }
+
     use std::process::Command;
     use std::os::unix::process::CommandExt;
     use surge_ping::{Client, Config, ICMP};
@@ -140,6 +144,6 @@ pub async fn check_and_acquire_privileges() -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub async fn check_and_acquire_privileges() -> Result<()> {
+pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> {
     Ok(())
 }
