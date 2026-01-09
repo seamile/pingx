@@ -73,74 +73,6 @@ impl Session {
         Self { cli }
     }
 
-    fn detect_protocol(&self, target: &str) -> Result<(crate::cli::Protocol, String)> {
-        // 1. Force Mode
-        if self.cli.ipv4 || self.cli.ipv6 {
-            return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-        }
-        if self.cli.tcp {
-            if let Some((host, port_str)) = target.rsplit_once(':') {
-                 let host = if host.starts_with('[') && host.ends_with(']') {
-                     &host[1..host.len()-1]
-                 } else {
-                     host
-                 };
-
-                 if let Ok(port) = port_str.parse::<u16>() {
-                     return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
-                 }
-            }
-            return Err(anyhow::anyhow!("TCP mode requires target format <host>:<port>"));
-        }
-        if self.cli.http {
-            let url_str = if target.starts_with("http") { target.to_string() } else { format!("http://{}", target) };
-            if let Ok(url) = reqwest::Url::parse(&url_str) {
-                if let Some(host) = url.host_str() {
-                    return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
-                }
-            }
-            // Fallback if parsing fails?
-            return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
-        }
-
-        // 2. Auto Mode
-        if target.starts_with("http://") || target.starts_with("https://") {
-             if let Ok(url) = reqwest::Url::parse(target) {
-                if let Some(host) = url.host_str() {
-                    return Ok((crate::cli::Protocol::Http(target.to_string()), host.to_string()));
-                }
-            }
-            return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
-        }
-
-        // Check for TCP format (host:port)
-        if let Some((host, port_str)) = target.rsplit_once(':') {
-             if let Ok(port) = port_str.parse::<u16>() {
-                 // Check if it's a valid IPv6 address (which contains colons)
-                 if target.parse::<std::net::Ipv6Addr>().is_ok() {
-                     // It's a plain IPv6 address, so ICMP
-                     return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-                 }
-
-                 // Also check IPv4 just in case
-                 if target.parse::<std::net::Ipv4Addr>().is_ok() {
-                     return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-                 }
-
-                 let clean_host = if host.starts_with('[') && host.ends_with(']') {
-                     &host[1..host.len()-1]
-                 } else {
-                     host
-                 };
-
-                 return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
-             }
-        }
-
-        // Default ICMP
-        Ok((crate::cli::Protocol::Icmp, target.to_string()))
-    }
-
     pub async fn run(&self) -> Result<()> {
         let targets = &self.cli.targets;
         let multi_target = targets.len() > 1;
@@ -154,7 +86,7 @@ impl Session {
 
         for target_string in targets {
             // Detect protocol and host
-            let (protocol, host_to_resolve) = match self.detect_protocol(target_string) {
+            let (protocol, host_to_resolve) = match crate::utils::detect_protocol(&self.cli, target_string) {
                 Ok(res) => res,
                 Err(e) => {
                     eprintln!("pingx: {}: {}", target_string, e);

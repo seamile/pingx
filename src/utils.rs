@@ -47,7 +47,33 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
 
 #[cfg(target_os = "linux")]
 pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
-    if cli.tcp || cli.http {
+    // Check if we need raw socket privileges by inspecting all targets
+    // If we have explicit ICMP flags, we definitely need raw socket.
+    let needs_raw_socket = if cli.ipv4 || cli.ipv6 {
+        true
+    } else {
+        // Iterate over targets to check if any requires ICMP
+        let mut has_icmp = false;
+        for target in &cli.targets {
+            match detect_protocol(cli, target) {
+                Ok((protocol, _)) => {
+                    if let crate::cli::Protocol::Icmp = protocol {
+                        has_icmp = true;
+                        break;
+                    }
+                },
+                Err(_) => {
+                    // If detection fails, we might default to ICMP or error out later.
+                    // Assuming safe default: if we can't parse it as TCP/HTTP, it might be a hostname for ICMP.
+                    has_icmp = true;
+                    break;
+                }
+            }
+        }
+        has_icmp
+    };
+
+    if !needs_raw_socket {
         return Ok(());
     }
 
@@ -146,4 +172,72 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> {
     Ok(())
+}
+
+pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cli::Protocol, String)> {
+    // 1. Force Mode
+    if cli.ipv4 || cli.ipv6 {
+        return Ok((crate::cli::Protocol::Icmp, target.to_string()));
+    }
+    if cli.tcp {
+        if let Some((host, port_str)) = target.rsplit_once(':') {
+             let host = if host.starts_with('[') && host.ends_with(']') {
+                 &host[1..host.len()-1]
+             } else {
+                 host
+             };
+
+             if let Ok(port) = port_str.parse::<u16>() {
+                 return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
+             }
+        }
+        return Err(anyhow::anyhow!("TCP mode requires target format <host>:<port>"));
+    }
+    if cli.http {
+        let url_str = if target.starts_with("http") { target.to_string() } else { format!("http://{}", target) };
+        if let Ok(url) = reqwest::Url::parse(&url_str) {
+            if let Some(host) = url.host_str() {
+                return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
+            }
+        }
+        // Fallback if parsing fails?
+        return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
+    }
+
+    // 2. Auto Mode
+    if target.starts_with("http://") || target.starts_with("https://") {
+         if let Ok(url) = reqwest::Url::parse(target) {
+            if let Some(host) = url.host_str() {
+                return Ok((crate::cli::Protocol::Http(target.to_string()), host.to_string()));
+            }
+        }
+        return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
+    }
+
+    // Check for TCP format (host:port)
+    if let Some((host, port_str)) = target.rsplit_once(':') {
+         if let Ok(port) = port_str.parse::<u16>() {
+             // Check if it's a valid IPv6 address (which contains colons)
+             if target.parse::<std::net::Ipv6Addr>().is_ok() {
+                 // It's a plain IPv6 address, so ICMP
+                 return Ok((crate::cli::Protocol::Icmp, target.to_string()));
+             }
+
+             // Also check IPv4 just in case
+             if target.parse::<std::net::Ipv4Addr>().is_ok() {
+                 return Ok((crate::cli::Protocol::Icmp, target.to_string()));
+             }
+
+             let clean_host = if host.starts_with('[') && host.ends_with(']') {
+                 &host[1..host.len()-1]
+             } else {
+                 host
+             };
+
+             return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
+         }
+    }
+
+    // Default ICMP
+    Ok((crate::cli::Protocol::Icmp, target.to_string()))
 }
