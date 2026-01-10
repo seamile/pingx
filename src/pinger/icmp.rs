@@ -12,7 +12,7 @@ pub struct IcmpPinger {
     target_name: String,
     target: IpAddr,
     id: u16,
-    _ttl: u32,
+    ttl: u32,
     size: usize,
     timeout: Duration,
     client: Option<Client>,
@@ -26,7 +26,7 @@ impl IcmpPinger {
             target_name,
             target,
             id,
-            _ttl: ttl,
+            ttl,
             size,
             timeout,
             client: None,
@@ -45,22 +45,7 @@ impl Pinger for IcmpPinger {
 
         let kind = if self.target.is_ipv6() { ICMP::V6 } else { ICMP::V4 };
 
-        // surge-ping 0.8 Config has ttl? Not sure about Builder.
-        // Let's try to set it.
-        // If not available, I'll ignore ttl for now or try pinger.ttl().
-        // Based on docs search, Config has ttl.
-        // I cast u32 to u8.
-
-        // Try struct init if builder fails? But last check passed builder.
-        // I will assume builder has ttl() or similar.
-        // Wait, I didn't include ttl in builder in previous successful check.
-        // I will try adding `.ttl(self.ttl as u8)`
-
-        // Actually, if builder doesn't have it, I can't guess.
-        // But `Config` struct usually has it.
-        // Let's try.
-
-        let client = Client::new(&Config::builder().kind(kind).build())?;
+        let client = Client::new(&Config::builder().kind(kind).ttl(self.ttl).build())?;
         self.client = Some(client);
         Ok(())
     }
@@ -90,13 +75,17 @@ impl Pinger for IcmpPinger {
             // surge-ping might bind socket with TTL.
 
             match pinger.ping((seq as u16).into(), &payload).await {
-                Ok((_packet, rtt)) => {
+                Ok((packet, rtt)) => {
+                    let ttl = match packet {
+                        surge_ping::IcmpPacket::V4(p) => p.get_ttl(),
+                        surge_ping::IcmpPacket::V6(p) => Some(p.get_max_hop_limit()),
+                    };
                     let _ = result_tx.send(PingResult {
                         target: target_name,
                         target_addr: target,
                         seq,
                         bytes: size,
-                        ttl: None,
+                        ttl: ttl.map(|t| t as u8),
                         rtt,
                         status: ProbeStatus::Success,
                     }).await;
