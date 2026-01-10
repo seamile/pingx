@@ -78,7 +78,10 @@ impl Pinger for IcmpPinger {
                 Ok((packet, rtt)) => {
                     let ttl = match packet {
                         surge_ping::IcmpPacket::V4(p) => p.get_ttl(),
-                        surge_ping::IcmpPacket::V6(p) => Some(p.get_max_hop_limit()),
+                        surge_ping::IcmpPacket::V6(p) => {
+                            let hlim = p.get_max_hop_limit();
+                            if hlim == 0 { None } else { Some(hlim) }
+                        },
                     };
                     let _ = result_tx.send(PingResult {
                         target: target_name,
