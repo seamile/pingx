@@ -45,7 +45,7 @@ impl IcmpPacket {
         buf.put_slice(&self.payload);
 
         let mut packet = buf.to_vec();
-        
+
         if self.message_type == IcmpType::EchoRequest as u8 {
             let checksum = calculate_checksum(&packet);
             packet[2] = (checksum >> 8) as u8;

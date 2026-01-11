@@ -60,15 +60,15 @@ impl Pinger for IcmpPinger {
     async fn ping(&self, seq: u64) -> Result<()> {
         let seq_u16 = seq as u16;
         let payload = vec![0u8; self.size];
-        
+
         let ident_hint = self.id;
-        
+
         let ident_key = if self.client.get_socket().get_type() == Type::DGRAM {
             None
         } else {
             Some(ident_hint)
         };
-        
+
         let rx = self.client.register(self.target, ident_key, seq_u16);
 
         let packet = IcmpPacket::new_request(self.target.is_ipv6(), ident_hint, seq_u16, payload);

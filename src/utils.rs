@@ -105,7 +105,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     if can_create_dgram {
         return Ok(());
     }
-    
+
     match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
         Ok(_) => return Ok(()),
         Err(e) => {

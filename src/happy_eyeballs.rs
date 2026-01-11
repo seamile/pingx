@@ -28,7 +28,7 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
     let mut futures = FuturesUnordered::new();
 
     let mut last_start_time = Instant::now();
-    
+
     // Start the first attempt immediately
     if let Some(addr) = addr_iter.next() {
         futures.push(spawn_probe(addr, protocol.clone()));
@@ -71,7 +71,7 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
                             }
                         }
                     },
-                    Err(_) => {} 
+                    Err(_) => {}
                 }
             }
 
@@ -150,12 +150,12 @@ async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
 async fn probe_icmp(addr: IpAddr) -> Result<()> {
     use crate::pinger::Pinger;
     use std::sync::Arc;
-    
+
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    
+
     // Create a temporary client for this probe
     let client = Arc::new(crate::pinger::icmp::IcmpClient::new(addr.is_ipv6(), 64)?);
-    
+
     let mut pinger = crate::pinger::icmp::IcmpPinger::new(
         "probe".to_string(),
         addr,
@@ -164,10 +164,10 @@ async fn probe_icmp(addr: IpAddr) -> Result<()> {
         PROBE_TIMEOUT,
         client,
     );
-    
+
     pinger.start(tx).await?;
     pinger.ping(0).await?;
-    
+
     match rx.recv().await {
         Some(res) => match res.status {
             crate::session::ProbeStatus::Success => Ok(()),

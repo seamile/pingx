@@ -85,7 +85,7 @@ impl Session {
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
-        
+
         let mut client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
         let mut client_v6: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
 
@@ -99,7 +99,7 @@ impl Session {
                     continue;
                 }
             };
-            
+
             target_protocols.insert(target_string.clone(), protocol.clone());
 
             let ip_version = if self.cli.ipv4 {
@@ -120,7 +120,7 @@ impl Session {
                              continue;
                          }
                      };
-                     
+
                      // Initialize ICMP client if needed
                      if let crate::cli::Protocol::Icmp = protocol {
                          if target_addr.is_ipv4() {
@@ -385,7 +385,7 @@ impl Session {
 
     fn render_table(target: &str, table: &TableData, k_widths: &[usize; 3], v_widths: &[usize; 3]) {
         let sep = " | ";
-        
+
         // Calculate total width for centering title
         // Each column is k_width + 1 (space) + v_width
         let col_widths: Vec<usize> = (0..3).map(|i| k_widths[i] + 1 + v_widths[i]).collect();
@@ -406,7 +406,7 @@ impl Session {
 
             for (c_idx, cell) in row.iter().enumerate() {
                 let cell_str = format!("{:>kw$} {:>vw$}", cell.key, cell.val, kw=k_widths[c_idx], vw=v_widths[c_idx]);
-                
+
                 if is_last_row {
                     line.push_str(&cell_str.bold().to_string());
                 } else {
