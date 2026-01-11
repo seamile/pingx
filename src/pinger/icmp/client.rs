@@ -22,7 +22,7 @@ pub struct AsyncSocket {
 impl AsyncSocket {
     pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
         let (sock_type, socket) = Self::create_socket(v6)?;
-        
+
         socket.set_nonblocking(true)?;
 
         if v6 {
@@ -43,7 +43,7 @@ impl AsyncSocket {
                 }
             }
         } else {
-            socket.set_ttl(ttl)?;
+            socket.set_ttl_v4(ttl)?;
             // Enable receiving TTL via CMSG
             let on: libc::c_int = 1;
              unsafe {
@@ -60,7 +60,7 @@ impl AsyncSocket {
                 }
             }
         }
-        
+
         let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(socket.into_raw_fd()) };
         let async_fd = AsyncFd::new(std_sock)?;
 
@@ -100,7 +100,7 @@ impl AsyncSocket {
                 };
                 let mut msg_name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                 let mut control_buf = [0u8; 1024];
-                
+
                 let mut msg = libc::msghdr {
                     msg_name: &mut msg_name as *mut _ as *mut _,
                     msg_namelen: std::mem::size_of_val(&msg_name) as libc::socklen_t,
@@ -119,9 +119,9 @@ impl AsyncSocket {
                     }
                     return Err(err);
                 }
-                
+
                 let n = ret as usize;
-                
+
                 // Parse address
                 let addr = unsafe {
                     let ptr = &msg_name as *const libc::sockaddr_storage;
@@ -140,7 +140,7 @@ impl AsyncSocket {
                     while !cmsg.is_null() {
                         let level = (*cmsg).cmsg_level;
                         let type_ = (*cmsg).cmsg_type;
-                        
+
                         if level == libc::IPPROTO_IP && type_ == libc::IP_TTL {
                              let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
                              ttl = Some(*ptr as u8);
@@ -148,7 +148,7 @@ impl AsyncSocket {
                              let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
                              ttl = Some(*ptr as u8);
                         }
-                        
+
                         cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
                     }
                 }
@@ -170,7 +170,7 @@ impl AsyncSocket {
             }
         }
     }
-    
+
     pub fn get_type(&self) -> Type {
         self.sock_type
     }
@@ -211,7 +211,7 @@ impl ReplyMap {
     ) {
         self.inner.lock().remove(&ReplyToken(host, ident, seq));
     }
-    
+
     pub fn dispatch(&self, host: IpAddr, ident: Option<u16>, seq: u16, reply: Reply) {
         if let Some(tx) = self.inner.lock().remove(&ReplyToken(host, ident, seq)) {
             let _ = tx.send(reply);
@@ -223,17 +223,17 @@ impl ReplyMap {
 pub struct IcmpClient {
     socket: AsyncSocket,
     reply_map: ReplyMap,
-    recv_task: Arc<JoinHandle<()>>, 
+    recv_task: Arc<JoinHandle<()>>,
 }
 
 impl IcmpClient {
     pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
         let socket = AsyncSocket::new(v6, ttl)?;
         let reply_map = ReplyMap::default();
-        
+
         let socket_clone = socket.clone();
         let map_clone = reply_map.clone();
-        
+
         let recv_task = task::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
@@ -241,15 +241,15 @@ impl IcmpClient {
                     Ok((sz, addr, msg_ttl)) => {
                         let timestamp = Instant::now();
                         let data = &buf[..sz];
-                        
+
                         let is_v6 = addr.ip().is_ipv6();
                         let socket_type = socket_clone.get_type();
-                        
+
                         let (icmp_bytes, ttl) = if is_v6 {
                             (data, msg_ttl)
                         } else {
                             // Adaptive IPv4 header skipping
-                            // Note: If using RAW socket, kernel might pass IP header. 
+                            // Note: If using RAW socket, kernel might pass IP header.
                             // If DGRAM, it might not.
                             // If we have msg_ttl (from CMSG), we prefer it.
                             if data.len() >= 20 && (data[0] >> 4) == 4 {
@@ -272,18 +272,18 @@ impl IcmpClient {
                             } else {
                                 packet.message_type == IcmpType::EchoReply as u8
                             };
-                            
+
                             if is_reply {
                                 let ident = if socket_type == Type::DGRAM {
                                     None
                                 } else {
                                     Some(packet.identifier)
                                 };
-                                
+
                                 map_clone.dispatch(
-                                    addr.ip(), 
-                                    ident, 
-                                    packet.sequence, 
+                                    addr.ip(),
+                                    ident,
+                                    packet.sequence,
                                     Reply { timestamp, packet, ttl }
                                 );
                             }
@@ -302,15 +302,15 @@ impl IcmpClient {
             recv_task: Arc::new(recv_task),
         })
     }
-    
+
     pub fn get_socket(&self) -> &AsyncSocket {
         &self.socket
     }
-    
+
     pub fn register(&self, host: IpAddr, ident: Option<u16>, seq: u16) -> oneshot::Receiver<Reply> {
         self.reply_map.new_waiter(host, ident, seq)
     }
-    
+
     pub fn unregister(&self, host: IpAddr, ident: Option<u16>, seq: u16) {
         self.reply_map.remove(host, ident, seq);
     }
