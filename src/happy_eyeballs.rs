@@ -148,15 +148,27 @@ async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
 }
 
 async fn probe_icmp(addr: IpAddr) -> Result<()> {
-    use surge_ping::{Client, Config, ICMP, PingIdentifier};
-    let kind = if addr.is_ipv4() { ICMP::V4 } else { ICMP::V6 };
-    let config = Config::builder().kind(kind).build();
-    let client = Client::new(&config)?;
-    let id = (std::process::id() as u16) ^ ((addr.to_string().len() as u16) << 8);
-    let mut pinger = client.pinger(addr, PingIdentifier(id)).await;
-    pinger.timeout(PROBE_TIMEOUT);
-    pinger.ping(0.into(), &[]).await?;
-    Ok(())
+    use crate::pinger::Pinger;
+    
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let mut pinger = crate::pinger::icmp::IcmpPinger::new(
+        "probe".to_string(),
+        addr,
+        64,
+        56,
+        PROBE_TIMEOUT,
+    );
+    
+    pinger.start(tx).await?;
+    pinger.ping(0).await?;
+    
+    match rx.recv().await {
+        Some(res) => match res.status {
+            crate::session::ProbeStatus::Success => Ok(()),
+            _ => Err(anyhow::anyhow!("Probe failed: {:?}", res.status)),
+        },
+        None => Err(anyhow::anyhow!("No result")),
+    }
 }
 
 #[cfg(test)]

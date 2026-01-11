@@ -1,4 +1,5 @@
 pub mod icmp;
+pub mod icmp_packet;
 pub mod tcp;
 pub mod http;
 
