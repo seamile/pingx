@@ -103,11 +103,11 @@ impl AsyncSocket {
 
                 let mut msg = libc::msghdr {
                     msg_name: &mut msg_name as *mut _ as *mut _,
-                    msg_namelen: std::mem::size_of_val(&msg_name) as libc::socklen_t,
+                    msg_namelen: std::mem::size_of_val(&msg_name) as _,
                     msg_iov: &mut iov,
                     msg_iovlen: 1,
                     msg_control: control_buf.as_mut_ptr() as *mut _,
-                    msg_controllen: control_buf.len() as libc::socklen_t,
+                    msg_controllen: control_buf.len() as _,
                     msg_flags: 0,
                 };
 
