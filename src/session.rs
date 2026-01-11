@@ -64,6 +64,8 @@ mod models {
     }
 }
 
+use std::sync::Arc;
+
 pub struct Session {
     cli: Cli,
 }
@@ -83,6 +85,9 @@ impl Session {
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
+        
+        let mut client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
+        let mut client_v6: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
 
         for target_string in targets {
             // Detect protocol and host
@@ -115,6 +120,33 @@ impl Session {
                              continue;
                          }
                      };
+                     
+                     // Initialize ICMP client if needed
+                     if let crate::cli::Protocol::Icmp = protocol {
+                         if target_addr.is_ipv4() {
+                             if client_v4.is_none() {
+                                 match crate::pinger::icmp::IcmpClient::new(false, self.cli.ttl) {
+                                     Ok(c) => client_v4 = Some(Arc::new(c)),
+                                     Err(e) => {
+                                         eprintln!("Failed to create IPv4 ICMP client: {}", e);
+                                         if !multi_target { return Err(anyhow::anyhow!(e)); }
+                                         continue;
+                                     }
+                                 }
+                             }
+                         } else {
+                             if client_v6.is_none() {
+                                 match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
+                                     Ok(c) => client_v6 = Some(Arc::new(c)),
+                                     Err(e) => {
+                                         eprintln!("Failed to create IPv6 ICMP client: {}", e);
+                                         if !multi_target { return Err(anyhow::anyhow!(e)); }
+                                         continue;
+                                     }
+                                 }
+                             }
+                         }
+                     }
 
                      all_stats.insert(target_string.clone(), models::PingStats::new(target_string.clone(), target_addr));
 
@@ -126,7 +158,9 @@ impl Session {
                          target_addr,
                          self.cli.ttl,
                          self.cli.size,
-                         self.cli.timeout
+                         self.cli.timeout,
+                         client_v4.clone(),
+                         client_v6.clone(),
                      );
 
                      if let Err(e) = pinger.start(tx.clone()).await {

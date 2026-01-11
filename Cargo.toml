@@ -26,6 +26,8 @@ futures = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
 bytes = "1.6"
 colored = "3.0.0"
+parking_lot = "0.12.5"
+libc = "0.2.180"
 
 [profile.release]
 opt-level = "z"

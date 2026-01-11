@@ -149,14 +149,20 @@ async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
 
 async fn probe_icmp(addr: IpAddr) -> Result<()> {
     use crate::pinger::Pinger;
+    use std::sync::Arc;
     
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    
+    // Create a temporary client for this probe
+    let client = Arc::new(crate::pinger::icmp::IcmpClient::new(addr.is_ipv6(), 64)?);
+    
     let mut pinger = crate::pinger::icmp::IcmpPinger::new(
         "probe".to_string(),
         addr,
-        64,
-        56,
+        64, // dummy ttl
+        64, // size
         PROBE_TIMEOUT,
+        client,
     );
     
     pinger.start(tx).await?;

@@ -79,7 +79,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
 
     use std::process::Command;
     use std::os::unix::process::CommandExt;
-    use surge_ping::{Client, Config, ICMP};
+    use socket2::{Domain, Protocol, Socket, Type};
     use std::io::{self, Write};
 
     // Helper to detect Chinese locale
@@ -95,17 +95,26 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         false
     }
 
-    // Try to create an ICMPv4 Client to check permissions
-    let config = Config::builder().kind(ICMP::V4).build();
-    match Client::new(&config) {
+    // Try to create an ICMP socket to check permissions.
+    // We try DGRAM first (unprivileged), then RAW.
+    // If DGRAM works, we don't need to prompt.
+    // If DGRAM fails and RAW works, we don't need to prompt.
+    // If both fail, and RAW failed with PermissionDenied, we prompt.
+
+    let can_create_dgram = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
+    if can_create_dgram {
+        return Ok(());
+    }
+    
+    match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
         Ok(_) => return Ok(()),
         Err(e) => {
-            // If it's not a permission error, return it
+             // If it's not a permission error, return it
             if e.kind() != std::io::ErrorKind::PermissionDenied {
                 return Err(e.into());
             }
         }
-    };
+    }
 
     let is_zh = is_chinese_locale();
 
