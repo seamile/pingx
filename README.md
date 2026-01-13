@@ -18,9 +18,11 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 cargo install pingx
 ```
 
-### Linux ICMP Permission Setup
+### Linux Permissions
 
-On Linux systems, ICMP ping requires special permissions. After installation, run:
+On Linux systems, `pingx` attempts to use unprivileged **DGRAM sockets** first, which work without root privileges if `net.ipv4.ping_group_range` covers the user's group.
+
+If that fails, it falls back to **RAW sockets**, which require `CAP_NET_RAW` capability. To enable this:
 
 ```shell
 sudo setcap cap_net_raw+ep $(which pingx)
@@ -66,7 +68,7 @@ Use flags to force specific protocols (target must match required format):
 
 - `-4`: Force IPv4 ICMP.
 - `-6`: Force IPv6 ICMP.
-- `-t` / `--tcp`: Force TCP protocol (Target must include port, e.g., `ip:port`).
+- `-T` / `--tcp`: Force TCP protocol (Target must include port, e.g., `ip:port`).
 - `-H` / `--http`: Force HTTP protocol.
 
 ```shell
@@ -74,12 +76,12 @@ Use flags to force specific protocols (target must match required format):
 pingx -4 example.com
 
 # Force TCP
-pingx -t example.com:443
+pingx -T example.com:443
 ```
 
 ### Concurrent Probing
 
-Supports probing multiple targets simultaneously. In multi-target mode, quiet mode (`-q`) is automatically enabled, showing only statistics at the end.
+Supports probing multiple targets simultaneously. Results are displayed interleaved unless quiet mode (`-q`) is enabled.
 
 ```shell
 pingx 1.1.1.1 www.github.com
@@ -91,6 +93,7 @@ pingx 1.1.1.1 www.github.com
 - `-i <INTERVAL>`: Wait interval seconds between sending each packet (default 1.0s).
 - `-w <DEADLINE>`: Stop running after deadline seconds.
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
+- `-t <TTL>`: Set the IP Time to Live (default 64).
 - `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
 - `-q`: Quiet output. Only displays summary statistics.
 
@@ -116,9 +119,11 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 cargo install pingx
 ```
 
-### Linux ICMP 权限设置
+### Linux 权限设置
 
-在 Linux 系统上，ICMP ping 需要特殊权限。安装完成后，请运行：
+在 Linux 系统上，PingX 会优先尝试使用非特权 **DGRAM socket**。如果系统配置了 `net.ipv4.ping_group_range`，则无需 root 权限即可运行。
+
+如果 DGRAM 模式不可用，程序会回退到 **RAW socket** 模式，此时需要 `CAP_NET_RAW` 权限：
 
 ```shell
 sudo setcap cap_net_raw+ep $(which pingx)
@@ -165,7 +170,7 @@ pingx 1.1.1.1:80
 
 - `-4`: 强制使用 ICMP 协议检测 IPv4 目标。
 - `-6`: 强制使用 ICMP 协议检测 IPv6 目标。
-- `-t` / `--tcp`: 强制使用 TCP 协议 (目标必须包含端口，如 `ip:port`)。
+- `-T` / `--tcp`: 强制使用 TCP 协议 (目标必须包含端口，如 `ip:port`)。
 - `-H` / `--http`: 强制使用 HTTP 协议。
 
 ```shell
@@ -173,12 +178,12 @@ pingx 1.1.1.1:80
 pingx -4 example.com
 
 # 强制使用 TCP 协议
-pingx -t example.com:443
+pingx -T example.com:443
 ```
 
 ### 并发探测
 
-pingx 可以并发对多个目标以不同协议进行检测。多目标模式下会自动开启安静模式 (`-q`)，仅在结束时输出统计信息。
+pingx 可以并发对多个目标以不同协议进行检测。结果将交替显示，除非开启安静模式 (`-q`)。
 
 ```shell
 pingx 1.1.1.1 www.github.com
@@ -190,5 +195,6 @@ pingx 1.1.1.1 www.github.com
 - `-i <INTERVAL>`: 发包间隔（秒），默认 1.0 秒。
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
+- `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
 - `-s <SIZE>`: ICMP 数据包大小（默认 56 字节）。
 - `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。
