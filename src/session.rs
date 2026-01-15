@@ -435,3 +435,100 @@ struct Cell {
 struct TableData {
     rows: [[Cell; 3]; 3],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, IpAddr};
+    use std::time::Duration;
+
+    #[test]
+    fn test_stats_calculation() {
+        let mut stats = models::PingStats::new(
+            "test".to_string(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+
+        // Add samples: 10ms, 20ms, 30ms
+        stats.update(&models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            seq: 1,
+            bytes: 56,
+            ttl: Some(64),
+            rtt: Duration::from_millis(10),
+            status: models::ProbeStatus::Success,
+        });
+        stats.update(&models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            seq: 2,
+            bytes: 56,
+            ttl: Some(64),
+            rtt: Duration::from_millis(20),
+            status: models::ProbeStatus::Success,
+        });
+        stats.update(&models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            seq: 3,
+            bytes: 56,
+            ttl: Some(64),
+            rtt: Duration::from_millis(30),
+            status: models::ProbeStatus::Success,
+        });
+
+        let table = Session::prepare_table_data(&stats);
+        
+        // Helper to find value by key
+        let get_val = |key: &str| -> String {
+            for row in &table.rows {
+                for cell in row {
+                    if cell.key == key {
+                        return cell.val.clone();
+                    }
+                }
+            }
+            panic!("Key {} not found", key);
+        };
+
+        // Min: 10
+        assert_eq!(get_val("min:"), "10.000 ms");
+        // Max: 30
+        assert_eq!(get_val("max:"), "30.000 ms");
+        // Avg: 20
+        assert_eq!(get_val("avg:"), "20.000 ms");
+        
+        // Mdev: (|10-20| + |20-20| + |30-20|) / 3 = (10 + 0 + 10) / 3 = 6.666...
+        assert_eq!(get_val("mdev:"), "6.667 ms");
+
+        // Jitter: (|20-10| + |30-20|) / 2 = (10 + 10) / 2 = 10
+        assert_eq!(get_val("jitter:"), "10.000 ms");
+    }
+
+    #[test]
+    fn test_stats_empty() {
+        let stats = models::PingStats::new(
+            "test".to_string(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+        let table = Session::prepare_table_data(&stats);
+         // Helper to find value by key
+        let get_val = |key: &str| -> String {
+            for row in &table.rows {
+                for cell in row {
+                    if cell.key == key {
+                        return cell.val.clone();
+                    }
+                }
+            }
+            panic!("Key {} not found", key);
+        };
+
+        assert_eq!(get_val("min:"), "-");
+        assert_eq!(get_val("max:"), "-");
+        assert_eq!(get_val("avg:"), "-");
+        assert_eq!(get_val("mdev:"), "-");
+        assert_eq!(get_val("jitter:"), "-");
+    }
+}

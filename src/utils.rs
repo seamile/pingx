@@ -336,4 +336,99 @@ mod tests {
         let raw = vec!["Invalid".to_string()];
         assert!(parse_headers(&raw).is_err());
     }
+
+    #[tokio::test]
+    async fn test_resolve_host_filtering() {
+        // IPv4
+        let addrs = resolve_host("127.0.0.1", IpVersion::Any).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].is_ipv4());
+
+        let addrs = resolve_host("127.0.0.1", IpVersion::V4).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+        
+        let res = resolve_host("127.0.0.1", IpVersion::V6).await;
+        assert!(res.is_err());
+
+        // IPv6
+        let addrs = resolve_host("::1", IpVersion::Any).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].is_ipv6());
+
+        let addrs = resolve_host("::1", IpVersion::V6).await.unwrap();
+        assert_eq!(addrs.len(), 1);
+
+        let res = resolve_host("::1", IpVersion::V4).await;
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_detect_protocol() {
+        let mut cli = crate::cli::Cli {
+            targets: vec![],
+            count: None,
+            interval: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(1),
+            deadline: None,
+            ttl: 64,
+            size: 56,
+            quiet: false,
+            ipv4: false,
+            ipv6: false,
+            tcp: false,
+            http: false,
+            headers: vec![],
+        };
+
+        // 1. Basic ICMP (Domain)
+        let (proto, target) = detect_protocol(&cli, "google.com").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Icmp);
+        assert_eq!(target, "google.com");
+
+        // 2. Basic ICMP (IPv4)
+        let (proto, target) = detect_protocol(&cli, "8.8.8.8").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Icmp);
+        assert_eq!(target, "8.8.8.8");
+
+        // 3. Basic ICMP (IPv6)
+        let (proto, target) = detect_protocol(&cli, "2001:4860:4860::8888").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Icmp);
+        assert_eq!(target, "2001:4860:4860::8888");
+
+        // 4. Auto TCP (host:port)
+        let (proto, target) = detect_protocol(&cli, "google.com:80").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Tcp(80));
+        assert_eq!(target, "google.com");
+
+        // 5. Auto HTTP (http://)
+        let (proto, target) = detect_protocol(&cli, "http://google.com").unwrap();
+        assert!(matches!(proto, crate::cli::Protocol::Http(ref s) if s == "http://google.com"));
+        assert_eq!(target, "google.com");
+
+        // 6. Auto HTTPS (https://)
+        let (proto, target) = detect_protocol(&cli, "https://google.com").unwrap();
+        assert!(matches!(proto, crate::cli::Protocol::Http(ref s) if s == "https://google.com"));
+        assert_eq!(target, "google.com");
+
+        // 7. Force TCP
+        cli.tcp = true;
+        let (proto, target) = detect_protocol(&cli, "google.com:443").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Tcp(443));
+        assert_eq!(target, "google.com");
+        cli.tcp = false;
+
+        // 8. Force HTTP
+        cli.http = true;
+        let (proto, target) = detect_protocol(&cli, "google.com").unwrap();
+        assert!(matches!(proto, crate::cli::Protocol::Http(ref s) if s == "http://google.com"));
+        assert_eq!(target, "google.com");
+        cli.http = false;
+
+        // 9. Force IPv4 (ICMP)
+        cli.ipv4 = true;
+        let (proto, target) = detect_protocol(&cli, "google.com").unwrap();
+        assert_eq!(proto, crate::cli::Protocol::Icmp);
+        assert_eq!(target, "google.com");
+        cli.ipv4 = false;
+    }
 }
