@@ -182,10 +182,8 @@ impl AsyncSocket {
                         let level = (*cmsg).cmsg_level;
                         let type_ = (*cmsg).cmsg_type;
 
-                        if level == libc::IPPROTO_IP && type_ == libc::IP_TTL {
-                             let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
-                             ttl = Some(*ptr as u8);
-                        } else if level == libc::IPPROTO_IPV6 && type_ == libc::IPV6_HOPLIMIT {
+                        if (level == libc::IPPROTO_IP && type_ == libc::IP_TTL) || 
+                           (level == libc::IPPROTO_IPV6 && type_ == libc::IPV6_HOPLIMIT) {
                              let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
                              ttl = Some(*ptr as u8);
                         }

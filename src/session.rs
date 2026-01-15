@@ -80,6 +80,8 @@ impl Session {
         let multi_target = targets.len() > 1;
         let quiet = self.cli.quiet;
 
+        let headers = crate::utils::parse_headers(&self.cli.headers)?;
+
         let (tx, mut rx) = tokio::sync::mpsc::channel::<models::PingResult>(100);
 
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
@@ -134,15 +136,13 @@ impl Session {
                                      }
                                  }
                              }
-                         } else {
-                             if client_v6.is_none() {
-                                 match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
-                                     Ok(c) => client_v6 = Some(Arc::new(c)),
-                                     Err(e) => {
-                                         eprintln!("Failed to create IPv6 ICMP client: {}", e);
-                                         if !multi_target { return Err(anyhow::anyhow!(e)); }
-                                         continue;
-                                     }
+                         } else if client_v6.is_none() {
+                             match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
+                                 Ok(c) => client_v6 = Some(Arc::new(c)),
+                                 Err(e) => {
+                                     eprintln!("Failed to create IPv6 ICMP client: {}", e);
+                                     if !multi_target { return Err(anyhow::anyhow!(e)); }
+                                     continue;
                                  }
                              }
                          }
@@ -152,13 +152,18 @@ impl Session {
 
                      println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
 
+                     let config = crate::pinger::PingerConfig {
+                         ttl: self.cli.ttl,
+                         size: self.cli.size,
+                         timeout: self.cli.timeout,
+                         headers: headers.clone(),
+                     };
+
                      let mut pinger = crate::pinger::create_pinger(
                          target_string.clone(),
                          protocol,
                          target_addr,
-                         self.cli.ttl,
-                         self.cli.size,
-                         self.cli.timeout,
+                         config,
                          client_v4.clone(),
                          client_v6.clone(),
                      );

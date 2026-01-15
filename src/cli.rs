@@ -53,6 +53,10 @@ pub struct Cli {
     /// Force HTTP ping.
     #[arg(short = 'H', long = "http", group = "mode")]
     pub http: bool,
+
+    /// Custom HTTP headers (e.g., "Host: example.com"). Can be specified multiple times.
+    #[arg(long = "header")]
+    pub headers: Vec<String>,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseFloatError> {

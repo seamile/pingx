@@ -20,13 +20,18 @@ pub trait Pinger: Send + Sync {
     async fn stop(&mut self) -> Result<()>;
 }
 
+pub struct PingerConfig {
+    pub ttl: u32,
+    pub size: usize,
+    pub timeout: Duration,
+    pub headers: reqwest::header::HeaderMap,
+}
+
 pub fn create_pinger(
     target_name: String,
     protocol: Protocol,
     target: IpAddr,
-    ttl: u32,
-    size: usize,
-    timeout: Duration,
+    config: PingerConfig,
     client_v4: Option<Arc<IcmpClient>>,
     client_v6: Option<Arc<IcmpClient>>,
 ) -> Box<dyn Pinger> {
@@ -37,13 +42,13 @@ pub fn create_pinger(
             } else {
                 client_v4.expect("IPv4 client needed but not provided")
             };
-            Box::new(icmp::IcmpPinger::new(target_name, target, ttl, size, timeout, client))
+            Box::new(icmp::IcmpPinger::new(target_name, target, config.ttl, config.size, config.timeout, client))
         },
-        Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(target_name, target, port, timeout)),
+        Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(target_name, target, port, config.timeout)),
         Protocol::Http(url) => {
             use reqwest::Url;
             let url = Url::parse(&url).unwrap_or_else(|_| Url::parse(&format!("http://{}", url)).unwrap());
-             Box::new(http::HttpPinger::new(target_name, url, target, timeout))
+             Box::new(http::HttpPinger::new(target_name, url, target, config.timeout, config.headers))
         },
     }
 }

@@ -2,7 +2,7 @@ use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus};
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::{Client, Method, Url};
+use reqwest::{Client, Method, Url, header::HeaderMap};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,11 +13,12 @@ pub struct HttpPinger {
     target_url: Url,
     target_ip: IpAddr,
     client: Client,
+    headers: HeaderMap,
     result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl HttpPinger {
-    pub fn new(target_name: String, target_url: Url, target_ip: IpAddr, timeout: Duration) -> Self {
+    pub fn new(target_name: String, target_url: Url, target_ip: IpAddr, timeout: Duration, headers: HeaderMap) -> Self {
         let mut builder = Client::builder()
             .timeout(timeout)
             .danger_accept_invalid_certs(true);
@@ -35,6 +36,7 @@ impl HttpPinger {
             target_url,
             target_ip,
             client,
+            headers,
             result_tx: Arc::new(Mutex::new(None)),
         }
     }
@@ -59,10 +61,11 @@ impl Pinger for HttpPinger {
         let target_ip = self.target_ip;
         let url = self.target_url.clone();
         let client = self.client.clone();
+        let headers = self.headers.clone();
 
         tokio::spawn(async move {
             let start = Instant::now();
-            let request = client.request(Method::HEAD, url);
+            let request = client.request(Method::HEAD, url).headers(headers);
 
             let (status_res, rtt, bytes) = match request.send().await {
                 Ok(response) => {

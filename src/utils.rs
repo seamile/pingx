@@ -250,3 +250,90 @@ pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cl
     // Default ICMP
     Ok((crate::cli::Protocol::Icmp, target.to_string()))
 }
+
+pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMap> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let mut headers = HeaderMap::new();
+
+    for raw in raw_headers {
+        // First split by newline
+        for line in raw.split('\n') {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Split by semicolon for potential multiple headers in one line
+            let segments: Vec<&str> = line.split(';').collect();
+            let mut current_header_name: Option<HeaderName> = None;
+            let mut current_header_value = String::new();
+
+            for segment in segments {
+                let trimmed = segment.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                if let Some((name_part, val_part)) = trimmed.split_once(':') {
+                    // If we already had a header in progress, save it
+                    if let Some(name) = current_header_name.take() {
+                        let value = HeaderValue::from_str(current_header_value.trim())
+                            .map_err(|e| anyhow::anyhow!("Invalid header value for '{}': {}", name, e))?;
+                        headers.append(name, value);
+                    }
+
+                    // Start new header
+                    let name = HeaderName::from_bytes(name_part.trim().as_bytes())
+                        .map_err(|e| anyhow::anyhow!("Invalid header name '{}': {}", name_part, e))?;
+                    current_header_name = Some(name);
+                    current_header_value = val_part.to_string();
+                } else {
+                    // No colon, append to previous value if exists (heuristic for semicolons in values)
+                    if current_header_name.is_some() {
+                        if !current_header_value.is_empty() {
+                            current_header_value.push_str("; ");
+                        }
+                        current_header_value.push_str(trimmed);
+                    } else {
+                        return Err(anyhow::anyhow!("Invalid header format: '{}'. Expected 'Name: Value'", trimmed));
+                    }
+                }
+            }
+
+            // Save final header in line
+            if let Some(name) = current_header_name {
+                let value = HeaderValue::from_str(current_header_value.trim())
+                    .map_err(|e| anyhow::anyhow!("Invalid header value for '{}': {}", name, e))?;
+                headers.append(name, value);
+            }
+        }
+    }
+
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_headers() {
+        let raw = vec![
+            "X-Test: 123".to_string(),
+            "A: 1; B: 2".to_string(),
+            "Cookie: session=abc; user=xyz".to_string(),
+            "Multi:\n  Line: value".to_string(),
+        ];
+        let headers = parse_headers(&raw).unwrap();
+        assert_eq!(headers.get("X-Test").unwrap(), "123");
+        assert_eq!(headers.get("A").unwrap(), "1");
+        assert_eq!(headers.get("B").unwrap(), "2");
+        assert_eq!(headers.get("Cookie").unwrap(), "session=abc; user=xyz");
+        assert_eq!(headers.get("Line").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_parse_headers_invalid() {
+        let raw = vec!["Invalid".to_string()];
+        assert!(parse_headers(&raw).is_err());
+    }
+}
