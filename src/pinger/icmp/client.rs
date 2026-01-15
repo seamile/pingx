@@ -3,23 +3,35 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(unix)]
+use tokio::io::unix::AsyncFd;
 
 use parking_lot::Mutex;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::unix::AsyncFd;
 use tokio::sync::oneshot;
 use tokio::task::{self, JoinHandle};
 
 use crate::pinger::icmp_packet::{IcmpPacket, IcmpType};
 
+#[cfg(unix)]
 #[derive(Clone)]
 pub struct AsyncSocket {
     inner: Arc<AsyncFd<std::net::UdpSocket>>,
     sock_type: Type,
 }
 
+#[cfg(not(unix))]
+#[derive(Clone)]
+pub struct AsyncSocket {
+    inner: Arc<tokio::net::UdpSocket>,
+    sock_type: Type,
+}
+
 impl AsyncSocket {
+    #[cfg(unix)]
     pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
         let (sock_type, socket) = Self::create_socket(v6)?;
 
@@ -70,6 +82,34 @@ impl AsyncSocket {
         })
     }
 
+    #[cfg(not(unix))]
+    pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
+        let (sock_type, socket) = Self::create_socket(v6)?;
+
+        socket.set_nonblocking(true)?;
+
+        if v6 {
+            socket.set_unicast_hops_v6(ttl)?;
+        } else {
+            socket.set_ttl_v4(ttl)?;
+        }
+
+        let addr = if v6 {
+            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+        } else {
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+        };
+        socket.bind(&addr.into())?;
+
+        let std_sock: std::net::UdpSocket = socket.into();
+        let tokio_sock = tokio::net::UdpSocket::from_std(std_sock)?;
+
+        Ok(Self {
+            inner: Arc::new(tokio_sock),
+            sock_type,
+        })
+    }
+
     fn create_socket(v6: bool) -> io::Result<(Type, Socket)> {
         let (domain, proto) = if v6 {
             (Domain::IPV6, Some(Protocol::ICMPV6))
@@ -88,6 +128,7 @@ impl AsyncSocket {
         }
     }
 
+    #[cfg(unix)]
     pub async fn recv_msg(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, Option<u8>)> {
         loop {
             let mut guard = self.inner.readable().await?;
@@ -161,6 +202,13 @@ impl AsyncSocket {
         }
     }
 
+    #[cfg(not(unix))]
+    pub async fn recv_msg(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, Option<u8>)> {
+        let (len, addr) = self.inner.recv_from(buf).await?;
+        Ok((len, addr, None))
+    }
+
+    #[cfg(unix)]
     pub async fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
         loop {
             let mut guard = self.inner.writable().await?;
@@ -169,6 +217,11 @@ impl AsyncSocket {
                 Err(_would_block) => continue,
             }
         }
+    }
+
+    #[cfg(not(unix))]
+    pub async fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        self.inner.send_to(buf, target).await
     }
 
     pub fn get_type(&self) -> Type {
