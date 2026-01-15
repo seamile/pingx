@@ -1,6 +1,3 @@
-[build]
-rustc-wrapper = "sccache"
-
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "split-debuginfo=unpacked"]
 
