@@ -37,9 +37,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+
+      - name: Test
+        run: cargo test --release --target ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
