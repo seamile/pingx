@@ -35,3 +35,12 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.dev]
+opt-level = 0
+debug = 1 # Only line tables, faster linking and smaller files
+
+# Optimize dependencies even in dev builds.
+# This makes build scripts and procedural macros run faster.
+[profile.dev.package."*"]
+opt-level = 3
