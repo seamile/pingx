@@ -1,4 +1,4 @@
-name: Manual Build
+name: Check
 
 on:
   workflow_dispatch:
@@ -35,15 +35,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Check
-        run: cargo check --target ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Clippy
+        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
 
       - name: Test
         run: cargo test --release --target ${{ matrix.target }}
