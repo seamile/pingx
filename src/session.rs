@@ -214,14 +214,13 @@ impl Session {
         loop {
             tokio::select! {
                 _ = interval.tick(), if !waiting_for_shutdown => {
-                    if let Some(c) = count {
-                        if seq > c {
+                    if let Some(c) = count 
+                        && seq > c {
                             waiting_for_shutdown = true;
                             if inflight_packets == 0 { break; }
                             // Reset sleep to wait for stragglers
                             wait_timeout = Box::pin(tokio::time::sleep(self.cli.timeout + Duration::from_millis(100)));
                             continue;
-                        }
                     }
 
                     for pinger in &pingers {

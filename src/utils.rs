@@ -86,10 +86,9 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     fn is_chinese_locale() -> bool {
         let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
         for var in vars {
-            if let Ok(val) = std::env::var(var) {
-                if val.to_lowercase().contains("zh") {
+            if let Ok(val) = std::env::var(var) 
+                && val.to_lowercase().contains("zh") {
                     return true;
-                }
             }
         }
         false
@@ -119,10 +118,10 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     let is_zh = is_chinese_locale();
 
     if is_zh {
-        println!("{}", format!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold()));
+        println!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold());
         println!("是否立即通过 sudo 授予此权限？（一次性设置）");
     } else {
-        println!("{}", format!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold()));
+        println!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold());
         println!("Grant this permission now via sudo? (One-time setup)");
     }
     println!();
@@ -144,7 +143,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     io::stdin().read_line(&mut input)?;
     let input = input.trim().to_lowercase();
 
-    if input != "y" && input != "" && input != "yes" {
+    if input != "y" && !input.is_empty() && input != "yes" {
         let msg = if is_zh { "用户取消操作" } else { "Operation cancelled by user" };
         return Err(anyhow::anyhow!("{}", msg));
     }
@@ -204,10 +203,9 @@ pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cl
     }
     if cli.http {
         let url_str = if target.starts_with("http") { target.to_string() } else { format!("http://{}", target) };
-        if let Ok(url) = reqwest::Url::parse(&url_str) {
-            if let Some(host) = url.host_str() {
+        if let Ok(url) = reqwest::Url::parse(&url_str) 
+            && let Some(host) = url.host_str() {
                 return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
-            }
         }
         // Fallback if parsing fails?
         return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
@@ -215,17 +213,16 @@ pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cl
 
     // 2. Auto Mode
     if target.starts_with("http://") || target.starts_with("https://") {
-         if let Ok(url) = reqwest::Url::parse(target) {
-            if let Some(host) = url.host_str() {
+         if let Ok(url) = reqwest::Url::parse(target) 
+            && let Some(host) = url.host_str() {
                 return Ok((crate::cli::Protocol::Http(target.to_string()), host.to_string()));
-            }
         }
         return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
     }
 
     // Check for TCP format (host:port)
-    if let Some((host, port_str)) = target.rsplit_once(':') {
-         if let Ok(port) = port_str.parse::<u16>() {
+    if let Some((host, port_str)) = target.rsplit_once(':') 
+         && let Ok(port) = port_str.parse::<u16>() {
              // Check if it's a valid IPv6 address (which contains colons)
              if target.parse::<std::net::Ipv6Addr>().is_ok() {
                  // It's a plain IPv6 address, so ICMP
@@ -244,7 +241,6 @@ pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cl
              };
 
              return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
-         }
     }
 
     // Default ICMP
