@@ -67,7 +67,30 @@ async fn main() {
         }
 
         if !records.is_empty() {
-            geoip::print_geo_table(&records);
+            if let Some(json_arg) = &args.json {
+                // JSON Output
+                use std::io::Write;
+                let json_output = if records.len() == 1 {
+                    serde_json::to_string_pretty(&records[0]).unwrap()
+                } else {
+                    serde_json::to_string_pretty(&records).unwrap()
+                };
+
+                if let Some(path) = json_arg {
+                    // Write to file
+                    if let Ok(mut file) = std::fs::File::create(path) {
+                        let _ = file.write_all(json_output.as_bytes());
+                    } else {
+                        eprintln!("pingx: Failed to write JSON to {}", path);
+                        std::process::exit(1);
+                    }
+                } else {
+                    // Write to stdout
+                    println!("{}", json_output);
+                }
+            } else {
+                geoip::print_geo_table(&records);
+            }
         }
 
         return;

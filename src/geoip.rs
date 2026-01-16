@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 use ip2location::{DB, Record};
 use reqwest::Client;
+use serde::Serialize;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::net::IpAddr;
@@ -236,6 +237,7 @@ impl GeoIpManager {
     }
 }
 
+#[derive(Serialize)]
 pub struct GeoRecord {
     pub ip: IpAddr,
     pub country: String,

@@ -64,6 +64,10 @@ pub struct Cli {
     /// Fetch/Update the GeoIP database.
     #[arg(long = "fetch-geo", group = "mode")]
     pub fetch_geo: bool,
+
+    /// Output results in JSON format. Optional value specifies output file.
+    #[arg(long = "json", num_args = 0..=1, value_name = "FILE")]
+    pub json: Option<Option<String>>,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseFloatError> {

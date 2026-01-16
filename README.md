@@ -9,6 +9,8 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 1. **Multi-Protocol**: ICMP, TCP, and HTTP probing.
 2. **Dual Stack**: Full support for IPv4, IPv6, and domain resolution.
 3. **Concurrency**: Probe multiple targets simultaneously.
+4. **GeoIP**: Retrieve geographical location (country, region, city, coordinates) for IP addresses.
+5. **JSON Output**: Export results to JSON for machine readability.
 
 ## Installation
 
@@ -87,6 +89,33 @@ Supports probing multiple targets simultaneously. Results are displayed interlea
 pingx 1.1.1.1 www.github.com
 ```
 
+### GeoIP Lookup
+
+Retrieve geographical information for IP addresses. The first run will guide you through downloading the IP2Location database.
+
+```shell
+# Lookup physical location
+pingx -g 1.1.1.1 8.8.8.8
+
+# Manually fetch/update database
+pingx --fetch-geo
+```
+
+### JSON Output
+
+Export results in structured JSON format. If one target, outputs an object; if multiple targets, outputs an array.
+
+```shell
+# Print JSON to stdout
+pingx 1.1.1.1 --json
+
+# Write JSON to file
+pingx 1.1.1.1 8.8.8.8 -c 5 --json result.json
+
+# JSON for GeoIP
+pingx -g 8.8.8.8 --json
+```
+
 ### Common Options
 
 - `-c <COUNT>`: Stop after sending count packets.
@@ -110,6 +139,8 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 1. **多协议支持**: 支持 ICMP、TCP 和 HTTP 协议探测。
 2. **双栈支持**: 完美支持 IPv4、IPv6 地址及域名解析。
 3. **并发探测**: 支持同时对多个目标发起探测。
+4. **GeoIP 信息**: 获取 IP 地址的物理地理位置（国家、地区、城市、经纬度）。
+5. **JSON 输出**: 支持将探测或定位结果以 JSON 格式输出，方便集成。
 
 ## 安装
 
@@ -187,6 +218,33 @@ pingx 可以并发对多个目标以不同协议进行检测。结果将交替�
 
 ```shell
 pingx 1.1.1.1 www.github.com
+```
+
+### GeoIP 位置查询
+
+获取 IP 地址的物理地理位置信息。第一次运行会引导你下载 IP2Location 数据库。
+
+```shell
+# 查询物理位置
+pingx -g 1.1.1.1 8.8.8.8
+
+# 手动更新/下载数据库
+pingx --fetch-geo
+```
+
+### JSON 格式输出
+
+将结果以结构化的 JSON 格式输出。单个目标输出对象 `{...}`，多个目标输出列表 `[{...}, ...]`。
+
+```shell
+# 打印 JSON 到屏幕
+pingx 1.1.1.1 --json
+
+# 保存 JSON 到文件
+pingx 1.1.1.1 8.8.8.8 -c 5 --json result.json
+
+# GeoIP 模式输出 JSON
+pingx -g 8.8.8.8 --json
 ```
 
 ### 常用参数

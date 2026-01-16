@@ -3,6 +3,7 @@ use crate::pinger::Pinger;
 use crate::utils::{IpVersion, resolve_host};
 use anyhow::Result;
 use colored::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::signal;
@@ -65,6 +66,24 @@ mod models {
 }
 
 use std::sync::Arc;
+
+#[derive(Serialize)]
+pub struct JsonResult {
+    pub target: String,
+    pub protocol: String,
+    pub ip: String,
+    pub packet_size: usize,
+    pub ttl: u32,
+    pub sent: u64,
+    pub received: u64,
+    pub loss: f64,
+    pub time: f64,
+    pub min: f64,
+    pub avg: f64,
+    pub max: f64,
+    pub mdev: f64,
+    pub jitter: f64,
+}
 
 pub struct Session {
     cli: Cli,
@@ -284,6 +303,100 @@ impl Session {
 
         for mut p in pingers {
             p.stop().await.ok();
+        }
+
+        // JSON Output Logic
+        if let Some(json_arg) = &self.cli.json {
+            let mut json_results = Vec::new();
+            
+            for target_host in targets {
+                if let Some(stats) = all_stats.get(target_host) {
+                    let protocol = target_protocols.get(target_host).unwrap_or(&crate::cli::Protocol::Icmp);
+                    let protocol_str = match protocol {
+                        crate::cli::Protocol::Icmp => "ICMP",
+                        crate::cli::Protocol::Tcp(_) => "TCP",
+                        crate::cli::Protocol::Http(_) => "HTTP",
+                    }.to_string();
+
+                    // Calculate stats
+                    let loss = if stats.transmitted > 0 {
+                        100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
+                    } else {
+                        0.0
+                    };
+                    let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
+                    
+                    let (min, max, avg, mdev, jitter) = if stats.received > 0 {
+                        let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
+                        let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
+                        let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
+                        
+                        let avg_duration = Duration::from_secs_f64(avg / 1000.0);
+                        let sum_sq_diff: f64 = stats.rtts.iter()
+                            .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
+                            .sum();
+                        let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
+
+                        let jitter = if stats.rtts.len() > 1 {
+                             let sum_diff: f64 = stats.rtts.windows(2)
+                                .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
+                                .sum();
+                            sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
+                        } else {
+                            0.0
+                        };
+                        (
+                            (min * 1000.0).round() / 1000.0,
+                            (max * 1000.0).round() / 1000.0,
+                            (avg * 1000.0).round() / 1000.0,
+                            (mdev * 1000.0).round() / 1000.0,
+                            (jitter * 1000.0).round() / 1000.0,
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0, 0.0, 0.0)
+                    };
+
+                    json_results.push(JsonResult {
+                        target: target_host.clone(),
+                        protocol: protocol_str,
+                        ip: stats._address.to_string(),
+                        packet_size: self.cli.size,
+                        ttl: self.cli.ttl,
+                        sent: stats.transmitted,
+                        received: stats.received,
+                        loss: (loss * 1000.0).round() / 1000.0, // Also round loss? Or keep precision? Instructions said "time values".
+                                                               // Let's stick to time values for strict compliance, 
+                                                               // but usually nice to format loss too.
+                                                               // Re-reading: "json 中的各项时间保留 3 位小数" -> time values only.
+                                                               // Loss is percentage. I will round time values.
+                        time: (total_time * 1000.0).round() / 1000.0, 
+                        min,
+                        avg,
+                        max,
+                        mdev,
+                        jitter,
+                    });
+                }
+            }
+
+            use std::io::Write;
+            let json_output = if json_results.len() == 1 {
+                serde_json::to_string_pretty(&json_results[0]).unwrap()
+            } else {
+                serde_json::to_string_pretty(&json_results).unwrap()
+            };
+
+            if let Some(path) = json_arg {
+                if let Ok(mut file) = std::fs::File::create(path) {
+                    let _ = file.write_all(json_output.as_bytes());
+                } else {
+                     eprintln!("pingx: Failed to write JSON to {}", path);
+                }
+            } else {
+                println!("{}", json_output);
+            }
+
+            return Ok(());
         }
 
         // Collect table data and calculate global column widths
