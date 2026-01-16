@@ -1,11 +1,12 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use colored::Colorize;
 use ip2location::{DB, Record};
 use reqwest::Client;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, Read, Seek, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::{SystemTime, Duration};
 use tokio::fs;
 
 const DB_V4_FILENAME: &str = "IP2LOCATION-LITE-DB5.BIN";
@@ -47,46 +48,15 @@ impl GeoIpManager {
             return Ok(());
         }
 
-        // If either is missing, trigger setup
-        println!("{}", "GeoIP Database Missing".bold().red());
-        println!("This feature requires IP2Location LITE DB5 databases.");
-        println!("Please follow these steps:");
-        println!("1. Register a free account at https://lite.ip2location.com/database-download");
-        println!("2. Copy your 'Download Token' from the dashboard.");
-        println!();
-
-        let token_path = config_dir.join(TOKEN_FILENAME);
-        let saved_token = if token_path.exists() {
-            fs::read_to_string(&token_path).await.ok()
-        } else {
-            None
-        };
-
-        let token = if let Some(t) = saved_token {
-            let t = t.trim().to_string();
-            print!("Found saved token: {}. Use this? [Y/n]: ", t);
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if input.trim().to_lowercase() == "n" {
-                prompt_for_token()?
-            } else {
-                t
-            }
-        } else {
-            prompt_for_token()?
-        };
-
-        // Create config dir if not exists
-        if !config_dir.exists() {
-            fs::create_dir_all(&config_dir).await?;
-        }
-
-        // Save token
-        fs::write(&token_path, &token).await?;
+        let token = self.get_token_strategy(&config_dir, false).await?;
 
         // Download and Install
-        self.download_and_install(&token, &config_dir).await?;
+        if let Err(e) = self.download_and_install(&token, &config_dir, true, true).await {
+            println!("{}", format!("Failed to download database: {}", e).red());
+            println!("Please check if your token is valid.");
+            println!("You can check/update your token at: {}", config_dir.join(TOKEN_FILENAME).display());
+            return Err(e);
+        }
 
         // Reload DBs
         *self = Self::new()?;
@@ -94,34 +64,144 @@ impl GeoIpManager {
         Ok(())
     }
 
-    async fn download_and_install(&self, token: &str, config_dir: &Path) -> Result<()> {
+    pub async fn fetch_geo_databases(&mut self) -> Result<()> {
+        let config_dir = get_config_dir()?;
+        
+        println!("{}", "Fetching GeoIP Database...".bold().blue());
+
+        let mut need_v4 = true;
+        let mut need_v6 = true;
+        let now = SystemTime::now();
+
+        // Check IPv4
+        let db_v4_path = config_dir.join(DB_V4_FILENAME);
+        if db_v4_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(&db_v4_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    if let Ok(elapsed) = now.duration_since(mtime) {
+                        if elapsed < Duration::from_secs(6 * 3600) {
+                            println!("{}", format!("IPv4 Database is up-to-date (updated {:.1} hours ago).", elapsed.as_secs_f64() / 3600.0).green());
+                            need_v4 = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check IPv6
+        let db_v6_path = config_dir.join(DB_V6_FILENAME);
+        if db_v6_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(&db_v6_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    if let Ok(elapsed) = now.duration_since(mtime) {
+                        if elapsed < Duration::from_secs(6 * 3600) {
+                            println!("{}", format!("IPv6 Database is up-to-date (updated {:.1} hours ago).", elapsed.as_secs_f64() / 3600.0).green());
+                            need_v6 = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !need_v4 && !need_v6 {
+            return Ok(());
+        }
+        
+        let token = self.get_token_strategy(&config_dir, true).await?;
+
+        if let Err(e) = self.download_and_install(&token, &config_dir, need_v4, need_v6).await {
+             println!("{}", format!("Fetch failed: {}", e).red());
+             println!("Please check if your token is valid.");
+             return Err(e);
+        }
+        
+        // Reload DBs
+        *self = Self::new()?;
+        
+        Ok(())
+    }
+
+    async fn get_token_strategy(&self, config_dir: &Path, force_prompt_if_missing: bool) -> Result<String> {
+        let token_path = config_dir.join(TOKEN_FILENAME);
+        
+        // Ensure config dir exists
+        if !config_dir.exists() {
+            fs::create_dir_all(&config_dir).await?;
+        }
+
+        let saved_token = if token_path.exists() {
+            fs::read_to_string(&token_path).await.ok().map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+
+        // If we have a saved token, and we are NOT in a context that requires re-verification explicitly (unless failed),
+        // we just use it.
+        if let Some(t) = saved_token {
+            if !t.is_empty() {
+                 if force_prompt_if_missing {
+                    // Even if force prompt is requested, if we have a token, we might want to ask "Use this?"
+                    // But requirement says: "If token file exists... direct use token".
+                    // The "force prompt" context was usually for when a previous attempt failed.
+                    // But here, let's stick to: if token exists, use it.
+                    // Wait, if fetch_geo is called, we definitely want to use the stored token first without prompt.
+                    return Ok(t);
+                 }
+                return Ok(t);
+            }
+        }
+
+        // If missing or empty, prompt
+        println!("{}", "GeoIP Database/Token Missing".bold().red());
+        println!("This feature requires IP2Location LITE DB5 databases.");
+        println!("Please follow these steps:");
+        println!("1. Register a free account at https://lite.ip2location.com/database-download");
+        println!("2. Copy your 'Download Token' from the dashboard.");
+        println!();
+
+        let token = prompt_for_token()?;
+        fs::write(&token_path, &token).await?;
+        
+        Ok(token)
+    }
+
+    async fn download_and_install(&self, token: &str, config_dir: &Path, need_v4: bool, need_v6: bool) -> Result<()> {
         let client = Client::new();
 
-        let v4_url = format!(
-            "https://www.ip2location.com/download/?token={}&file=DB5LITEBIN",
-            token
-        );
-        let v6_url = format!(
-            "https://www.ip2location.com/download/?token={}&file=DB5LITEBINIPV6",
-            token
-        );
+        if need_v4 {
+            let v4_url = format!(
+                "https://www.ip2location.com/download/?token={}&file=DB5LITEBIN",
+                token
+            );
+            println!("Downloading IPv4 Database...");
+            let v4_zip = config_dir.join("db4.zip");
+            download_file(&client, &v4_url, &v4_zip).await?;
+            println!("Extracting IPv4 Database...");
+            extract_zip(&v4_zip, DB_V4_FILENAME, config_dir)?;
+            let _ = fs::remove_file(v4_zip).await;
+        }
 
-        println!("Downloading IPv4 Database...");
-        let v4_zip = config_dir.join("db4.zip");
-        download_file(&client, &v4_url, &v4_zip).await?;
-
-        println!("Downloading IPv6 Database...");
-        let v6_zip = config_dir.join("db6.zip");
-        download_file(&client, &v6_url, &v6_zip).await?;
-
-        println!("Extracting Databases...");
-        // Unzip
-        unzip_and_move(&v4_zip, DB_V4_FILENAME, config_dir)?;
-        unzip_and_move(&v6_zip, DB_V6_FILENAME, config_dir)?;
-
-        // Cleanup
-        let _ = fs::remove_file(v4_zip).await;
-        let _ = fs::remove_file(v6_zip).await;
+        if need_v6 {
+            let v6_url = format!(
+                "https://www.ip2location.com/download/?token={}&file=DB5LITEBINIPV6",
+                token
+            );
+            println!("Downloading IPv6 Database...");
+            let v6_zip = config_dir.join("db6.zip");
+            download_file(&client, &v6_url, &v6_zip).await?;
+            println!("Extracting IPv6 Database...");
+            extract_zip(&v6_zip, DB_V6_FILENAME, config_dir)?;
+            let _ = fs::remove_file(v6_zip).await;
+        }
+        
+        // Cleanup Garbage
+        let garbage = vec!["LICENSE_LITE.TXT", "README_LITE.TXT"];
+        for g in garbage {
+            let p = config_dir.join(g);
+            if p.exists() {
+                let _ = fs::remove_file(p).await;
+            }
+        }
 
         println!("{}", "Database setup complete.".green());
         Ok(())
@@ -150,12 +230,6 @@ impl GeoIpManager {
         } else {
             return None;
         };
-
-        // Check if invalid (0.0.0.0 lat/long often means invalid)
-        if r.latitude.unwrap_or(0.0) == 0.0 && r.longitude.unwrap_or(0.0) == 0.0 {
-            // It might be valid 0,0 but unlikely for a user IP.
-            // However, we just return what we have.
-        }
 
         Some(GeoRecord {
             ip,
@@ -200,6 +274,9 @@ fn prompt_for_token() -> Result<String> {
 async fn download_file(client: &Client, url: &str, path: &Path) -> Result<()> {
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
+        if resp.status().as_u16() == 403 || resp.status().as_u16() == 401 {
+             return Err(anyhow!("Download failed (HTTP {}). Invalid Token?", resp.status()));
+        }
         return Err(anyhow!("Failed to download: {}", resp.status()));
     }
     let content = resp.bytes().await?;
@@ -207,45 +284,69 @@ async fn download_file(client: &Client, url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unzip_and_move(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Result<()> {
-    // We unzip to dest_dir
-    // unzip -o zip_path -d dest_dir
-    let status = Command::new("unzip")
-        .arg("-o")
-        .arg(zip_path)
-        .arg("-d")
-        .arg(dest_dir)
-        .output()
-        .context("Failed to execute unzip command")?;
-
-    if !status.status.success() {
-        return Err(anyhow!(
-            "Unzip failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        ));
+fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Result<()> {
+    let mut file = File::open(zip_path)?;
+    
+    // Check Magic Number for PK Zip signature
+    let mut magic = [0u8; 2];
+    if file.read(&mut magic).is_ok() && (magic != [0x50, 0x4B]) {
+        // Not a zip file, likely an error text
+        file.rewind()?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        // Truncate if too long (optional)
+        let msg = if content.len() > 200 { 
+            format!("{}...", &content[..200]) 
+        } else { 
+            content 
+        };
+        return Err(anyhow!("Download Error: {}", msg.trim()));
     }
+    file.rewind()?; // Reset for ZipArchive
 
-    // The zip might contain the file directly or in a folder?
-    // Usually LITE DB zip contains: IP2LOCATION-LITE-DB5.BIN directly.
-    // We need to ensure the file exists.
-    let expected_path = dest_dir.join(target_filename);
-    if !expected_path.exists() {
-        // Sometimes it might be lowercase or something?
-        // Let's check for case-insensitive match if needed, but usually it's standard.
-        // Or maybe check if it extracted to a subdir?
-        // For now assume standard structure.
-        return Err(anyhow!("Extracted file not found: {:?}", expected_path));
+    let mut archive = zip::ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let name = file.name().to_string(); // Clone name to avoid borrow issues if needed
+
+        // We only extract the target file
+        // The zip might contain the file in a subdir? Usually LITE DB is flat or single folder.
+        // We match by checking if the filename ends with the target filename (case insensitive?)
+        // The target filename is strict here: IP2LOCATION-LITE-DB5.BIN
+        
+        // Simple case: Exact match
+        if name == target_filename || name.ends_with(&format!("/{}", target_filename)) {
+            let dest_path = dest_dir.join(target_filename);
+            let mut outfile = File::create(&dest_path)?;
+            io::copy(&mut file, &mut outfile)?;
+            return Ok(());
+        }
+        
+        // Case-insensitive fallback?
+        if name.eq_ignore_ascii_case(target_filename) {
+             let dest_path = dest_dir.join(target_filename);
+             let mut outfile = File::create(&dest_path)?;
+             io::copy(&mut file, &mut outfile)?;
+             return Ok(());
+        }
     }
-
-    Ok(())
+    
+    Err(anyhow!("File {} not found in archive", target_filename))
 }
 
 pub fn print_geo_table(records: &[GeoRecord]) {
     // Determine max widths
-    let mut w_ip = 13; // "IP" length
-    let mut w_country = 7; // "Country"
-    let mut w_region = 6; // "Region"
-    let mut w_city = 4; // "City"
+    // Ensure header is covered
+    let mut w_ip = "IP".len();
+    let mut w_country = "Country".len();
+    let mut w_region = "Region".len();
+    let mut w_city = "City".len();
+    // Fixed width for Lat/Long (header "Longitude" is 9, "Latitude" is 8)
+    // Values are formatted as {:>10.6} and {:>9.6} which results in fixed width.
+    // 10.6 -> 3 digits + 1 dot + 6 decimals = 10 chars. OK.
+    // Longitude header is 9 chars.
+    // Latitude header is 8 chars.
 
     for r in records {
         w_ip = w_ip.max(r.ip.to_string().len());
@@ -262,13 +363,16 @@ pub fn print_geo_table(records: &[GeoRecord]) {
         format!("{:>width$}", "Region", width = w_region).bold(),
         format!("{:>width$}", "City", width = w_city).bold(),
         format!("{:>10}", "Longitude").bold(),
-        format!("{:>9}", "Latitude").bold(),
+        format!("{:>10}", "Latitude").bold(), // Fixed: Changed 9 to 10 to match value padding + visual balance? 
+                                                // Wait, values are {:>9.6} => typically 9 chars (e.g., 23.109034 is 9 chars).
+                                                // -33.867779 is 10 chars (1 sign + 2 digits + 1 dot + 6 dec).
+                                                // So we need at least 10 width for alignment.
     );
 
     // Print Rows
     for r in records {
         println!(
-            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>10.6} | {:>9.6}",
+            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>10.6} | {:>10.6}", // Changed Latitude to 10.6
             r.ip,
             r.country,
             r.region,

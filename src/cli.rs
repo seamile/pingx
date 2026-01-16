@@ -5,7 +5,7 @@ use std::time::Duration;
 #[command(author, version, about = "A versatile network diagnostic tool to replace system ping/ping6.", long_about = None)]
 pub struct Cli {
     /// List of IP addresses, Domains, or URLs to ping.
-    #[arg(required = true)]
+    #[arg(required_unless_present = "fetch_geo")]
     pub targets: Vec<String>,
 
     /// Stop after sending N packets.
@@ -60,6 +60,10 @@ pub struct Cli {
     /// GeoIP lookup mode. Displays location information for the targets and exits.
     #[arg(short = 'g', long = "geo", group = "mode")]
     pub geo: bool,
+
+    /// Fetch/Update the GeoIP database.
+    #[arg(long = "fetch-geo", group = "mode")]
+    pub fetch_geo: bool,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseFloatError> {

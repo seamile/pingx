@@ -30,6 +30,7 @@ parking_lot = "0.12.5"
 libc = "0.2.180"
 ip2location = "0.6.0"
 dirs = "6.0.0"
+zip = "7.1.0"
 
 [profile.release]
 opt-level = "z"
