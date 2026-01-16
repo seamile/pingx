@@ -66,7 +66,7 @@ impl GeoIpManager {
 
     pub async fn fetch_geo_databases(&mut self) -> Result<()> {
         let config_dir = get_config_dir()?;
-        
+
         println!("{}", "Fetching GeoIP Database...".bold().blue());
 
         let mut need_v4 = true;
@@ -75,38 +75,30 @@ impl GeoIpManager {
 
         // Check IPv4
         let db_v4_path = config_dir.join(DB_V4_FILENAME);
-        if db_v4_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(&db_v4_path) {
-                if let Ok(mtime) = metadata.modified() {
-                    if let Ok(elapsed) = now.duration_since(mtime) {
-                        if elapsed < Duration::from_secs(6 * 3600) {
+        if db_v4_path.exists()
+            && let Ok(metadata) = std::fs::metadata(&db_v4_path)
+                && let Ok(mtime) = metadata.modified()
+                    && let Ok(elapsed) = now.duration_since(mtime)
+                        && elapsed < Duration::from_secs(6 * 3600) {
                             println!("{}", format!("IPv4 Database is up-to-date (updated {:.1} hours ago).", elapsed.as_secs_f64() / 3600.0).green());
                             need_v4 = false;
                         }
-                    }
-                }
-            }
-        }
 
         // Check IPv6
         let db_v6_path = config_dir.join(DB_V6_FILENAME);
-        if db_v6_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(&db_v6_path) {
-                if let Ok(mtime) = metadata.modified() {
-                    if let Ok(elapsed) = now.duration_since(mtime) {
-                        if elapsed < Duration::from_secs(6 * 3600) {
+        if db_v6_path.exists()
+            && let Ok(metadata) = std::fs::metadata(&db_v6_path)
+                && let Ok(mtime) = metadata.modified()
+                    && let Ok(elapsed) = now.duration_since(mtime)
+                        && elapsed < Duration::from_secs(6 * 3600) {
                             println!("{}", format!("IPv6 Database is up-to-date (updated {:.1} hours ago).", elapsed.as_secs_f64() / 3600.0).green());
                             need_v6 = false;
                         }
-                    }
-                }
-            }
-        }
 
         if !need_v4 && !need_v6 {
             return Ok(());
         }
-        
+
         let token = self.get_token_strategy(&config_dir, true).await?;
 
         if let Err(e) = self.download_and_install(&token, &config_dir, need_v4, need_v6).await {
@@ -114,16 +106,16 @@ impl GeoIpManager {
              println!("Please check if your token is valid.");
              return Err(e);
         }
-        
+
         // Reload DBs
         *self = Self::new()?;
-        
+
         Ok(())
     }
 
     async fn get_token_strategy(&self, config_dir: &Path, force_prompt_if_missing: bool) -> Result<String> {
         let token_path = config_dir.join(TOKEN_FILENAME);
-        
+
         // Ensure config dir exists
         if !config_dir.exists() {
             fs::create_dir_all(&config_dir).await?;
@@ -137,8 +129,8 @@ impl GeoIpManager {
 
         // If we have a saved token, and we are NOT in a context that requires re-verification explicitly (unless failed),
         // we just use it.
-        if let Some(t) = saved_token {
-            if !t.is_empty() {
+        if let Some(t) = saved_token
+            && !t.is_empty() {
                  if force_prompt_if_missing {
                     // Even if force prompt is requested, if we have a token, we might want to ask "Use this?"
                     // But requirement says: "If token file exists... direct use token".
@@ -149,7 +141,6 @@ impl GeoIpManager {
                  }
                 return Ok(t);
             }
-        }
 
         // If missing or empty, prompt
         println!("{}", "GeoIP Database/Token Missing".bold().red());
@@ -161,7 +152,7 @@ impl GeoIpManager {
 
         let token = prompt_for_token()?;
         fs::write(&token_path, &token).await?;
-        
+
         Ok(token)
     }
 
@@ -193,7 +184,7 @@ impl GeoIpManager {
             extract_zip(&v6_zip, DB_V6_FILENAME, config_dir)?;
             let _ = fs::remove_file(v6_zip).await;
         }
-        
+
         // Cleanup Garbage
         let garbage = vec!["LICENSE_LITE.TXT", "README_LITE.TXT"];
         for g in garbage {
@@ -286,7 +277,7 @@ async fn download_file(client: &Client, url: &str, path: &Path) -> Result<()> {
 
 fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Result<()> {
     let mut file = File::open(zip_path)?;
-    
+
     // Check Magic Number for PK Zip signature
     let mut magic = [0u8; 2];
     if file.read(&mut magic).is_ok() && (magic != [0x50, 0x4B]) {
@@ -295,10 +286,10 @@ fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Resul
         let mut content = String::new();
         file.read_to_string(&mut content)?;
         // Truncate if too long (optional)
-        let msg = if content.len() > 200 { 
-            format!("{}...", &content[..200]) 
-        } else { 
-            content 
+        let msg = if content.len() > 200 {
+            format!("{}...", &content[..200])
+        } else {
+            content
         };
         return Err(anyhow!("Download Error: {}", msg.trim()));
     }
@@ -314,7 +305,7 @@ fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Resul
         // The zip might contain the file in a subdir? Usually LITE DB is flat or single folder.
         // We match by checking if the filename ends with the target filename (case insensitive?)
         // The target filename is strict here: IP2LOCATION-LITE-DB5.BIN
-        
+
         // Simple case: Exact match
         if name == target_filename || name.ends_with(&format!("/{}", target_filename)) {
             let dest_path = dest_dir.join(target_filename);
@@ -322,7 +313,7 @@ fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Resul
             io::copy(&mut file, &mut outfile)?;
             return Ok(());
         }
-        
+
         // Case-insensitive fallback?
         if name.eq_ignore_ascii_case(target_filename) {
              let dest_path = dest_dir.join(target_filename);
@@ -331,7 +322,7 @@ fn extract_zip(zip_path: &Path, target_filename: &str, dest_dir: &Path) -> Resul
              return Ok(());
         }
     }
-    
+
     Err(anyhow!("File {} not found in archive", target_filename))
 }
 
@@ -362,23 +353,20 @@ pub fn print_geo_table(records: &[GeoRecord]) {
         format!("{:>width$}", "Country", width = w_country).bold(),
         format!("{:>width$}", "Region", width = w_region).bold(),
         format!("{:>width$}", "City", width = w_city).bold(),
+        format!("{:>10}", "Latitude").bold(),
         format!("{:>10}", "Longitude").bold(),
-        format!("{:>10}", "Latitude").bold(), // Fixed: Changed 9 to 10 to match value padding + visual balance? 
-                                                // Wait, values are {:>9.6} => typically 9 chars (e.g., 23.109034 is 9 chars).
-                                                // -33.867779 is 10 chars (1 sign + 2 digits + 1 dot + 6 dec).
-                                                // So we need at least 10 width for alignment.
     );
 
     // Print Rows
     for r in records {
         println!(
-            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>10.6} | {:>10.6}", // Changed Latitude to 10.6
+            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>10.6} | {:>10.6}",
             r.ip,
             r.country,
             r.region,
             r.city,
-            r.longitude,
             r.latitude,
+            r.longitude,
             w_ip = w_ip,
             w_country = w_country,
             w_region = w_region,
