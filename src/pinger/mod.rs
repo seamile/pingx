@@ -1,17 +1,17 @@
+pub mod http;
 pub mod icmp;
 pub mod icmp_packet;
 pub mod tcp;
-pub mod http;
 
-use async_trait::async_trait;
-use anyhow::Result;
-use crate::session::PingResult;
 use crate::cli::Protocol;
-use std::net::IpAddr;
-use std::time::Duration;
-use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use crate::pinger::icmp::IcmpClient;
+use crate::session::PingResult;
+use anyhow::Result;
+use async_trait::async_trait;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 
 #[async_trait]
 pub trait Pinger: Send + Sync {
@@ -42,13 +42,32 @@ pub fn create_pinger(
             } else {
                 client_v4.expect("IPv4 client needed but not provided")
             };
-            Box::new(icmp::IcmpPinger::new(target_name, target, config.ttl, config.size, config.timeout, client))
-        },
-        Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(target_name, target, port, config.timeout)),
+            Box::new(icmp::IcmpPinger::new(
+                target_name,
+                target,
+                config.ttl,
+                config.size,
+                config.timeout,
+                client,
+            ))
+        }
+        Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(
+            target_name,
+            target,
+            port,
+            config.timeout,
+        )),
         Protocol::Http(url) => {
             use reqwest::Url;
-            let url = Url::parse(&url).unwrap_or_else(|_| Url::parse(&format!("http://{}", url)).unwrap());
-             Box::new(http::HttpPinger::new(target_name, url, target, config.timeout, config.headers))
-        },
+            let url = Url::parse(&url)
+                .unwrap_or_else(|_| Url::parse(&format!("http://{}", url)).unwrap());
+            Box::new(http::HttpPinger::new(
+                target_name,
+                url,
+                target,
+                config.timeout,
+                config.headers,
+            ))
+        }
     }
 }

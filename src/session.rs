@@ -1,18 +1,18 @@
 use crate::cli::Cli;
-use crate::pinger::{Pinger};
-use crate::utils::{resolve_host, IpVersion};
+use crate::pinger::Pinger;
+use crate::utils::{IpVersion, resolve_host};
 use anyhow::Result;
-use tokio::signal;
+use colored::*;
 use std::collections::HashMap;
 use std::time::Duration;
-use colored::*;
+use tokio::signal;
 
 pub use self::models::{PingResult, ProbeStatus};
 
 mod models {
     use std::net::IpAddr;
-    use std::time::Instant;
     use std::time::Duration;
+    use std::time::Instant;
 
     #[derive(Debug, Clone)]
     pub enum ProbeStatus {
@@ -93,14 +93,17 @@ impl Session {
 
         for target_string in targets {
             // Detect protocol and host
-            let (protocol, host_to_resolve) = match crate::utils::detect_protocol(&self.cli, target_string) {
-                Ok(res) => res,
-                Err(e) => {
-                    eprintln!("pingx: {}: {}", target_string, e);
-                    if !multi_target { return Err(e); }
-                    continue;
-                }
-            };
+            let (protocol, host_to_resolve) =
+                match crate::utils::detect_protocol(&self.cli, target_string) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        eprintln!("pingx: {}: {}", target_string, e);
+                        if !multi_target {
+                            return Err(e);
+                        }
+                        continue;
+                    }
+                };
 
             target_protocols.insert(target_string.clone(), protocol.clone());
 
@@ -114,66 +117,82 @@ impl Session {
 
             match resolve_host(&host_to_resolve, ip_version).await {
                 Ok(addrs) => {
-                     let target_addr = match crate::happy_eyeballs::select_best_addr(addrs, &protocol).await {
-                         Ok(addr) => addr,
-                         Err(e) => {
-                             eprintln!("pingx: {}: {}", target_string, e);
-                             if !multi_target { return Err(e); }
-                             continue;
-                         }
-                     };
+                    let target_addr =
+                        match crate::happy_eyeballs::select_best_addr(addrs, &protocol).await {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                eprintln!("pingx: {}: {}", target_string, e);
+                                if !multi_target {
+                                    return Err(e);
+                                }
+                                continue;
+                            }
+                        };
 
-                     // Initialize ICMP client if needed
-                     if let crate::cli::Protocol::Icmp = protocol {
-                         if target_addr.is_ipv4() {
-                             if client_v4.is_none() {
-                                 match crate::pinger::icmp::IcmpClient::new(false, self.cli.ttl) {
-                                     Ok(c) => client_v4 = Some(Arc::new(c)),
-                                     Err(e) => {
-                                         eprintln!("Failed to create IPv4 ICMP client: {}", e);
-                                         if !multi_target { return Err(anyhow::anyhow!(e)); }
-                                         continue;
-                                     }
-                                 }
-                             }
-                         } else if client_v6.is_none() {
-                             match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
-                                 Ok(c) => client_v6 = Some(Arc::new(c)),
-                                 Err(e) => {
-                                     eprintln!("Failed to create IPv6 ICMP client: {}", e);
-                                     if !multi_target { return Err(anyhow::anyhow!(e)); }
-                                     continue;
-                                 }
-                             }
-                         }
-                     }
+                    // Initialize ICMP client if needed
+                    if let crate::cli::Protocol::Icmp = protocol {
+                        if target_addr.is_ipv4() {
+                            if client_v4.is_none() {
+                                match crate::pinger::icmp::IcmpClient::new(false, self.cli.ttl) {
+                                    Ok(c) => client_v4 = Some(Arc::new(c)),
+                                    Err(e) => {
+                                        eprintln!("Failed to create IPv4 ICMP client: {}", e);
+                                        if !multi_target {
+                                            return Err(anyhow::anyhow!(e));
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                        } else if client_v6.is_none() {
+                            match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
+                                Ok(c) => client_v6 = Some(Arc::new(c)),
+                                Err(e) => {
+                                    eprintln!("Failed to create IPv6 ICMP client: {}", e);
+                                    if !multi_target {
+                                        return Err(anyhow::anyhow!(e));
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
-                     all_stats.insert(target_string.clone(), models::PingStats::new(target_string.clone(), target_addr));
+                    all_stats.insert(
+                        target_string.clone(),
+                        models::PingStats::new(target_string.clone(), target_addr),
+                    );
 
-                     println!("PING {} ({}) {}({}) bytes of data.", target_string, target_addr, self.cli.size, self.cli.size + 28);
+                    println!(
+                        "PING {} ({}) {}({}) bytes of data.",
+                        target_string,
+                        target_addr,
+                        self.cli.size,
+                        self.cli.size + 28
+                    );
 
-                     let config = crate::pinger::PingerConfig {
-                         ttl: self.cli.ttl,
-                         size: self.cli.size,
-                         timeout: self.cli.timeout,
-                         headers: headers.clone(),
-                     };
+                    let config = crate::pinger::PingerConfig {
+                        ttl: self.cli.ttl,
+                        size: self.cli.size,
+                        timeout: self.cli.timeout,
+                        headers: headers.clone(),
+                    };
 
-                     let mut pinger = crate::pinger::create_pinger(
-                         target_string.clone(),
-                         protocol,
-                         target_addr,
-                         config,
-                         client_v4.clone(),
-                         client_v6.clone(),
-                     );
+                    let mut pinger = crate::pinger::create_pinger(
+                        target_string.clone(),
+                        protocol,
+                        target_addr,
+                        config,
+                        client_v4.clone(),
+                        client_v6.clone(),
+                    );
 
-                     if let Err(e) = pinger.start(tx.clone()).await {
-                         eprintln!("Failed to start pinger for {}: {}", target_string, e);
-                         continue;
-                     }
-                     pingers.push(pinger);
-                },
+                    if let Err(e) = pinger.start(tx.clone()).await {
+                        eprintln!("Failed to start pinger for {}: {}", target_string, e);
+                        continue;
+                    }
+                    pingers.push(pinger);
+                }
                 Err(e) => {
                     eprintln!("pingx: {}: {}", target_string, e);
                     if !multi_target {
@@ -214,7 +233,7 @@ impl Session {
         loop {
             tokio::select! {
                 _ = interval.tick(), if !waiting_for_shutdown => {
-                    if let Some(c) = count 
+                    if let Some(c) = count
                         && seq > c {
                             waiting_for_shutdown = true;
                             if inflight_packets == 0 { break; }
@@ -277,8 +296,10 @@ impl Session {
                 let table = Self::prepare_table_data(stats);
                 for r in 0..3 {
                     for c in 0..3 {
-                        global_key_widths[c] = std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
-                        global_val_widths[c] = std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
+                        global_key_widths[c] =
+                            std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
+                        global_val_widths[c] =
+                            std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
                     }
                 }
                 tables.push((target_host.clone(), table));
@@ -310,18 +331,30 @@ impl Session {
 
                 match protocol {
                     crate::cli::Protocol::Icmp => {
-                        println!("{} bytes from {}: {}={}{} time={:.3} ms",
-                            result.bytes, result.target_addr, seq_prefix, result.seq, ttl_str, result.rtt.as_secs_f64() * 1000.0);
-                    },
+                        println!(
+                            "{} bytes from {}: {}={}{} time={:.3} ms",
+                            result.bytes,
+                            result.target_addr,
+                            seq_prefix,
+                            result.seq,
+                            ttl_str,
+                            result.rtt.as_secs_f64() * 1000.0
+                        );
+                    }
                     _ => {
-                        println!("from {}: {}={} time={:.3} ms",
-                            result.target_addr, seq_prefix, result.seq, result.rtt.as_secs_f64() * 1000.0);
+                        println!(
+                            "from {}: {}={} time={:.3} ms",
+                            result.target_addr,
+                            seq_prefix,
+                            result.seq,
+                            result.rtt.as_secs_f64() * 1000.0
+                        );
                     }
                 }
-            },
+            }
             models::ProbeStatus::Timeout => {
                 println!("Request timeout for {}={}", seq_prefix, result.seq);
-            },
+            }
             models::ProbeStatus::Error(e) => {
                 eprintln!("Error for {}={}: {}", seq_prefix, result.seq, e);
             }
@@ -330,60 +363,100 @@ impl Session {
 
     fn prepare_table_data(stats: &models::PingStats) -> TableData {
         let loss = if stats.transmitted > 0 {
-             100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
-        } else { 0.0 };
+            100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
+        } else {
+            0.0
+        };
 
         let total_time = stats.start_time.elapsed().as_millis();
 
         let (min, max, avg, mdev, jitter) = if stats.received > 0 {
-             let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
-             let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-             let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
+            let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
+            let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
+            let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0
+                / stats.rtts.len() as f64;
 
-             let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-             let sum_sq_diff: f64 = stats.rtts.iter()
-                 .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
-                 .sum();
-             let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
+            let avg_duration = Duration::from_secs_f64(avg / 1000.0);
+            let sum_sq_diff: f64 = stats
+                .rtts
+                .iter()
+                .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
+                .sum();
+            let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
 
-             let jitter = if stats.rtts.len() > 1 {
-                 let sum_diff: f64 = stats.rtts.windows(2)
-                     .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
-                     .sum();
-                 sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
-             } else {
-                 0.0
-             };
+            let jitter = if stats.rtts.len() > 1 {
+                let sum_diff: f64 = stats
+                    .rtts
+                    .windows(2)
+                    .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
+                    .sum();
+                sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
+            } else {
+                0.0
+            };
 
-             (
-                 format!("{:.3} ms", min),
-                 format!("{:.3} ms", max),
-                 format!("{:.3} ms", avg),
-                 format!("{:.3} ms", mdev),
-                 format!("{:.3} ms", jitter)
-             )
+            (
+                format!("{:.3} ms", min),
+                format!("{:.3} ms", max),
+                format!("{:.3} ms", avg),
+                format!("{:.3} ms", mdev),
+                format!("{:.3} ms", jitter),
+            )
         } else {
-             (String::from("-"), String::from("-"), String::from("-"), String::from("-"), String::from("-"))
+            (
+                String::from("-"),
+                String::from("-"),
+                String::from("-"),
+                String::from("-"),
+                String::from("-"),
+            )
         };
 
         TableData {
             rows: [
                 [
-                    Cell { key: "send:".to_string(), val: format!("{}", stats.transmitted) },
-                    Cell { key: "min:".to_string(),  val: min },
-                    Cell { key: "time:".to_string(), val: format!("{} ms", total_time) },
+                    Cell {
+                        key: "send:".to_string(),
+                        val: format!("{}", stats.transmitted),
+                    },
+                    Cell {
+                        key: "min:".to_string(),
+                        val: min,
+                    },
+                    Cell {
+                        key: "time:".to_string(),
+                        val: format!("{} ms", total_time),
+                    },
                 ],
                 [
-                    Cell { key: "recv:".to_string(), val: format!("{}", stats.received) },
-                    Cell { key: "max:".to_string(),  val: max },
-                    Cell { key: "jitter:".to_string(), val: jitter },
+                    Cell {
+                        key: "recv:".to_string(),
+                        val: format!("{}", stats.received),
+                    },
+                    Cell {
+                        key: "max:".to_string(),
+                        val: max,
+                    },
+                    Cell {
+                        key: "jitter:".to_string(),
+                        val: jitter,
+                    },
                 ],
                 [
-                    Cell { key: "loss:".to_string(), val: format!("{:.0} %", loss) },
-                    Cell { key: "avg:".to_string(),  val: avg },
-                    Cell { key: "mdev:".to_string(), val: mdev },
+                    Cell {
+                        key: "loss:".to_string(),
+                        val: format!("{:.0} %", loss),
+                    },
+                    Cell {
+                        key: "avg:".to_string(),
+                        val: avg,
+                    },
+                    Cell {
+                        key: "mdev:".to_string(),
+                        val: mdev,
+                    },
                 ],
-            ]
+            ],
         }
     }
 
@@ -402,14 +475,25 @@ impl Session {
             0
         };
 
-        println!("\n{:padding$}{}", "", format!("=== {} ping statistics ===", target.bold()).blue(), padding=padding);
+        println!(
+            "\n{:padding$}{}",
+            "",
+            format!("=== {} ping statistics ===", target.bold()).blue(),
+            padding = padding
+        );
 
         for (r_idx, row) in table.rows.iter().enumerate() {
             let is_last_row = r_idx == 2;
             let mut line = String::new();
 
             for (c_idx, cell) in row.iter().enumerate() {
-                let cell_str = format!("{:>kw$} {:>vw$}", cell.key, cell.val, kw=k_widths[c_idx], vw=v_widths[c_idx]);
+                let cell_str = format!(
+                    "{:>kw$} {:>vw$}",
+                    cell.key,
+                    cell.val,
+                    kw = k_widths[c_idx],
+                    vw = v_widths[c_idx]
+                );
 
                 if is_last_row {
                     line.push_str(&cell_str.bold().to_string());
@@ -438,15 +522,13 @@ struct TableData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, IpAddr};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
     #[test]
     fn test_stats_calculation() {
-        let mut stats = models::PingStats::new(
-            "test".to_string(),
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
-        );
+        let mut stats =
+            models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
         // Add samples: 10ms, 20ms, 30ms
         stats.update(&models::PingResult {
@@ -478,7 +560,7 @@ mod tests {
         });
 
         let table = Session::prepare_table_data(&stats);
-        
+
         // Helper to find value by key
         let get_val = |key: &str| -> String {
             for row in &table.rows {
@@ -497,7 +579,7 @@ mod tests {
         assert_eq!(get_val("max:"), "30.000 ms");
         // Avg: 20
         assert_eq!(get_val("avg:"), "20.000 ms");
-        
+
         // Mdev: (|10-20| + |20-20| + |30-20|) / 3 = (10 + 0 + 10) / 3 = 6.666...
         assert_eq!(get_val("mdev:"), "6.667 ms");
 
@@ -507,12 +589,10 @@ mod tests {
 
     #[test]
     fn test_stats_empty() {
-        let stats = models::PingStats::new(
-            "test".to_string(),
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
-        );
+        let stats =
+            models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         let table = Session::prepare_table_data(&stats);
-         // Helper to find value by key
+        // Helper to find value by key
         let get_val = |key: &str| -> String {
             for row in &table.rows {
                 for cell in row {

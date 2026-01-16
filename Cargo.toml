@@ -28,6 +28,8 @@ bytes = "1.11.0"
 colored = "3.0.0"
 parking_lot = "0.12.5"
 libc = "0.2.180"
+ip2location = "0.6.0"
+dirs = "6.0.0"
 
 [profile.release]
 opt-level = "z"

@@ -1,14 +1,14 @@
 use crate::pinger::Pinger;
-use crate::pinger::icmp_packet::{IcmpPacket};
+use crate::pinger::icmp::client::IcmpClient;
+use crate::pinger::icmp_packet::IcmpPacket;
 use crate::session::{PingResult, ProbeStatus};
 use anyhow::Result;
 use async_trait::async_trait;
+use socket2::Type;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
-use crate::pinger::icmp::client::{IcmpClient};
-use socket2::Type;
+use tokio::sync::{Mutex, mpsc};
 
 pub struct IcmpPinger {
     target_name: String,
@@ -77,7 +77,7 @@ impl Pinger for IcmpPinger {
 
         if let Err(e) = self.client.get_socket().send_to(&encoded, &sock_addr).await {
             self.client.unregister(self.target, ident_key, seq_u16);
-             self.send_result(PingResult {
+            self.send_result(PingResult {
                 target: self.target_name.clone(),
                 target_addr: self.target,
                 seq,
@@ -85,7 +85,8 @@ impl Pinger for IcmpPinger {
                 ttl: None,
                 rtt: Duration::ZERO,
                 status: ProbeStatus::Error(e.to_string()),
-            }).await;
+            })
+            .await;
             return Ok(());
         }
 
@@ -103,44 +104,50 @@ impl Pinger for IcmpPinger {
                     let rtt = reply.timestamp.duration_since(start);
                     let guard = result_tx.lock().await;
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(PingResult {
-                            target: target_name,
-                            target_addr,
-                            seq,
-                            bytes: size,
-                            ttl: reply.ttl,
-                            rtt,
-                            status: ProbeStatus::Success,
-                        }).await;
+                        let _ = tx
+                            .send(PingResult {
+                                target: target_name,
+                                target_addr,
+                                seq,
+                                bytes: size,
+                                ttl: reply.ttl,
+                                rtt,
+                                status: ProbeStatus::Success,
+                            })
+                            .await;
                     }
-                },
+                }
                 Ok(Err(_)) => {
                     let guard = result_tx.lock().await;
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(PingResult {
-                            target: target_name,
-                            target_addr,
-                            seq,
-                            bytes: 0,
-                            ttl: None,
-                            rtt: Duration::ZERO,
-                            status: ProbeStatus::Error("Receiver closed".into()),
-                        }).await;
+                        let _ = tx
+                            .send(PingResult {
+                                target: target_name,
+                                target_addr,
+                                seq,
+                                bytes: 0,
+                                ttl: None,
+                                rtt: Duration::ZERO,
+                                status: ProbeStatus::Error("Receiver closed".into()),
+                            })
+                            .await;
                     }
-                },
+                }
                 Err(_) => {
                     client.unregister(target_addr, ident_key, seq_u16);
                     let guard = result_tx.lock().await;
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(PingResult {
-                            target: target_name,
-                            target_addr,
-                            seq,
-                            bytes: 0,
-                            ttl: None,
-                            rtt: Duration::ZERO,
-                            status: ProbeStatus::Timeout,
-                        }).await;
+                        let _ = tx
+                            .send(PingResult {
+                                target: target_name,
+                                target_addr,
+                                seq,
+                                bytes: 0,
+                                ttl: None,
+                                rtt: Duration::ZERO,
+                                status: ProbeStatus::Timeout,
+                            })
+                            .await;
                     }
                 }
             }

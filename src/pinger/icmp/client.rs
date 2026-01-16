@@ -58,7 +58,7 @@ impl AsyncSocket {
             socket.set_ttl_v4(ttl)?;
             // Enable receiving TTL via CMSG
             let on: libc::c_int = 1;
-             unsafe {
+            unsafe {
                 // IP_RECVTTL is standard for Linux/macOS
                 let ret = libc::setsockopt(
                     socket.as_raw_fd(),
@@ -171,7 +171,9 @@ impl AsyncSocket {
                         *len = msg.msg_namelen;
                         Ok(())
                     })?;
-                    sock_addr.as_socket().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid address"))?
+                    sock_addr.as_socket().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid address")
+                    })?
                 };
 
                 // Parse CMSG for TTL
@@ -182,10 +184,11 @@ impl AsyncSocket {
                         let level = (*cmsg).cmsg_level;
                         let type_ = (*cmsg).cmsg_type;
 
-                        if (level == libc::IPPROTO_IP && type_ == libc::IP_TTL) || 
-                           (level == libc::IPPROTO_IPV6 && type_ == libc::IPV6_HOPLIMIT) {
-                             let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
-                             ttl = Some(*ptr as u8);
+                        if (level == libc::IPPROTO_IP && type_ == libc::IP_TTL)
+                            || (level == libc::IPPROTO_IPV6 && type_ == libc::IPV6_HOPLIMIT)
+                        {
+                            let ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;
+                            ttl = Some(*ptr as u8);
                         }
 
                         cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
@@ -254,12 +257,7 @@ impl ReplyMap {
         rx
     }
 
-    pub fn remove(
-        &self,
-        host: IpAddr,
-        ident: Option<u16>,
-        seq: u16,
-    ) {
+    pub fn remove(&self, host: IpAddr, ident: Option<u16>, seq: u16) {
         self.inner.lock().remove(&ReplyToken(host, ident, seq));
     }
 
@@ -318,7 +316,7 @@ impl IcmpClient {
                         };
 
                         if let Ok(packet) = IcmpPacket::decode(icmp_bytes) {
-                             let is_reply = if is_v6 {
+                            let is_reply = if is_v6 {
                                 packet.message_type == IcmpType::EchoReplyV6 as u8
                             } else {
                                 packet.message_type == IcmpType::EchoReply as u8
@@ -335,13 +333,17 @@ impl IcmpClient {
                                     addr.ip(),
                                     ident,
                                     packet.sequence,
-                                    Reply { timestamp, packet, ttl }
+                                    Reply {
+                                        timestamp,
+                                        packet,
+                                        ttl,
+                                    },
                                 );
                             }
                         }
                     }
                     Err(e) => {
-                         eprintln!("ICMP recv error: {}", e);
+                        eprintln!("ICMP recv error: {}", e);
                     }
                 }
             }

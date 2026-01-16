@@ -1,13 +1,13 @@
+use crate::cli::Protocol;
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{sleep, Instant, Sleep};
-use crate::cli::Protocol;
-use futures::stream::{FuturesUnordered, StreamExt};
-use std::pin::Pin;
-use std::future::Future;
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, Sleep, sleep};
 
 // RFC 8305 parameters
 const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(50);
@@ -35,7 +35,8 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
         last_start_time = Instant::now();
     }
 
-    let delay = CONNECTION_ATTEMPT_DELAY.clamp(MIN_CONNECTION_ATTEMPT_DELAY, MAX_CONNECTION_ATTEMPT_DELAY);
+    let delay =
+        CONNECTION_ATTEMPT_DELAY.clamp(MIN_CONNECTION_ATTEMPT_DELAY, MAX_CONNECTION_ATTEMPT_DELAY);
     let mut next_attempt_timer: Pin<Box<Sleep>> = Box::pin(sleep(delay));
 
     loop {
@@ -88,7 +89,10 @@ struct AbortOnDropHandle<T>(JoinHandle<T>);
 
 impl<T> Future for AbortOnDropHandle<T> {
     type Output = Result<T, tokio::task::JoinError>;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         Pin::new(&mut self.0).poll(cx)
     }
 }
@@ -103,7 +107,11 @@ fn interleave_addrs(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
     let mut v6 = Vec::new();
     let mut v4 = Vec::new();
     for addr in addrs {
-        if addr.is_ipv6() { v6.push(addr); } else { v4.push(addr); }
+        if addr.is_ipv6() {
+            v6.push(addr);
+        } else {
+            v4.push(addr);
+        }
     }
     let mut result = Vec::with_capacity(v6.len() + v4.len());
     let mut v6_iter = v6.drain(..);
@@ -111,17 +119,21 @@ fn interleave_addrs(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
     loop {
         let a = v6_iter.next();
         let b = v4_iter.next();
-        if a.is_none() && b.is_none() { break; }
-        if let Some(ip) = a { result.push(ip); }
-        if let Some(ip) = b { result.push(ip); }
+        if a.is_none() && b.is_none() {
+            break;
+        }
+        if let Some(ip) = a {
+            result.push(ip);
+        }
+        if let Some(ip) = b {
+            result.push(ip);
+        }
     }
     result
 }
 
 fn spawn_probe(addr: IpAddr, protocol: Protocol) -> AbortOnDropHandle<Result<IpAddr>> {
-    let handle = tokio::spawn(async move {
-        probe_address(addr, &protocol).await.map(|_| addr)
-    });
+    let handle = tokio::spawn(async move { probe_address(addr, &protocol).await.map(|_| addr) });
     AbortOnDropHandle(handle)
 }
 
@@ -130,11 +142,13 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
         Protocol::Icmp => probe_icmp(addr).await,
         Protocol::Tcp(port) => probe_tcp(addr, *port).await,
         Protocol::Http(url_str) => {
-             let port = if let Ok(url) = reqwest::Url::parse(url_str) {
-                 url.port_or_known_default().unwrap_or(80)
-             } else { 80 };
-             probe_tcp(addr, port).await
-        },
+            let port = if let Ok(url) = reqwest::Url::parse(url_str) {
+                url.port_or_known_default().unwrap_or(80)
+            } else {
+                80
+            };
+            probe_tcp(addr, port).await
+        }
     }
 }
 

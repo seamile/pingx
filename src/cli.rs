@@ -37,7 +37,6 @@ pub struct Cli {
     pub quiet: bool,
 
     // Mode Flags (Mutually Exclusive via 'mode' group)
-
     /// Force IPv4 ICMP ping.
     #[arg(short = '4', group = "mode")]
     pub ipv4: bool,
@@ -57,6 +56,10 @@ pub struct Cli {
     /// Custom HTTP headers (e.g., "Host: example.com"). Can be specified multiple times.
     #[arg(long = "header")]
     pub headers: Vec<String>,
+
+    /// GeoIP lookup mode. Displays location information for the targets and exits.
+    #[arg(short = 'g', long = "geo", group = "mode")]
+    pub geo: bool,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseFloatError> {

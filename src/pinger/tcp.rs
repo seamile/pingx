@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 pub struct TcpPinger {
     target_name: String,
@@ -17,8 +17,19 @@ pub struct TcpPinger {
 }
 
 impl TcpPinger {
-    pub fn new(target_name: String, target: IpAddr, port: u16, timeout: std::time::Duration) -> Self {
-        Self { target_name, target, port, timeout, result_tx: Arc::new(Mutex::new(None)) }
+    pub fn new(
+        target_name: String,
+        target: IpAddr,
+        port: u16,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            target_name,
+            target,
+            port,
+            timeout,
+            result_tx: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -33,7 +44,9 @@ impl Pinger for TcpPinger {
     async fn ping(&self, seq: u64) -> Result<()> {
         let result_tx = {
             let guard = self.result_tx.lock().await;
-            if guard.is_none() { return Ok(()); }
+            if guard.is_none() {
+                return Ok(());
+            }
             guard.clone().unwrap()
         };
 
@@ -53,17 +66,23 @@ impl Pinger for TcpPinger {
                 Err(_) => ProbeStatus::Timeout,
             };
 
-            let rtt = if let ProbeStatus::Success = status { start.elapsed() } else { std::time::Duration::ZERO };
+            let rtt = if let ProbeStatus::Success = status {
+                start.elapsed()
+            } else {
+                std::time::Duration::ZERO
+            };
 
-            let _ = result_tx.send(PingResult {
-                target: target_name,
-                target_addr: target,
-                seq,
-                bytes: 0,
-                ttl: None,
-                rtt,
-                status,
-            }).await;
+            let _ = result_tx
+                .send(PingResult {
+                    target: target_name,
+                    target_addr: target,
+                    seq,
+                    bytes: 0,
+                    ttl: None,
+                    rtt,
+                    status,
+                })
+                .await;
         });
 
         Ok(())

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use std::net::IpAddr;
-use tokio::net::lookup_host;
 #[cfg(target_os = "linux")]
 use colored::Colorize;
+use std::net::IpAddr;
+use tokio::net::lookup_host;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IpVersion {
@@ -15,8 +15,12 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
     // Try to parse as IpAddr first
     if let Ok(addr) = host.parse::<IpAddr>() {
         match (version, addr) {
-            (IpVersion::V4, IpAddr::V6(_)) => return Err(anyhow::anyhow!("IPv6 address provided but -4 used")),
-            (IpVersion::V6, IpAddr::V4(_)) => return Err(anyhow::anyhow!("IPv4 address provided but -6 used")),
+            (IpVersion::V4, IpAddr::V6(_)) => {
+                return Err(anyhow::anyhow!("IPv6 address provided but -4 used"));
+            }
+            (IpVersion::V6, IpAddr::V4(_)) => {
+                return Err(anyhow::anyhow!("IPv4 address provided but -6 used"));
+            }
             _ => return Ok(vec![addr]),
         }
     }
@@ -61,7 +65,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
                         has_icmp = true;
                         break;
                     }
-                },
+                }
                 Err(_) => {
                     // If detection fails, we might default to ICMP or error out later.
                     // Assuming safe default: if we can't parse it as TCP/HTTP, it might be a hostname for ICMP.
@@ -77,18 +81,19 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         return Ok(());
     }
 
-    use std::process::Command;
-    use std::os::unix::process::CommandExt;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::io::{self, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
 
     // Helper to detect Chinese locale
     fn is_chinese_locale() -> bool {
         let vars = ["LC_ALL", "LC_MESSAGES", "LANG"];
         for var in vars {
-            if let Ok(val) = std::env::var(var) 
-                && val.to_lowercase().contains("zh") {
-                    return true;
+            if let Ok(val) = std::env::var(var)
+                && val.to_lowercase().contains("zh")
+            {
+                return true;
             }
         }
         false
@@ -108,7 +113,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
         Ok(_) => return Ok(()),
         Err(e) => {
-             // If it's not a permission error, return it
+            // If it's not a permission error, return it
             if e.kind() != std::io::ErrorKind::PermissionDenied {
                 return Err(e.into());
             }
@@ -118,10 +123,16 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     let is_zh = is_chinese_locale();
 
     if is_zh {
-        println!("{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。", "pingx".bold());
+        println!(
+            "{} 使用原生 Raw Sockets 以获得最佳性能，这需要 'cap_net_raw' 权限。",
+            "pingx".bold()
+        );
         println!("是否立即通过 sudo 授予此权限？（一次性设置）");
     } else {
-        println!("{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.", "pingx".bold());
+        println!(
+            "{} uses native Raw Sockets for best performance, this requires 'cap_net_raw' capability.",
+            "pingx".bold()
+        );
         println!("Grant this permission now via sudo? (One-time setup)");
     }
     println!();
@@ -129,7 +140,10 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     let current_exe = std::env::current_exe()?;
     let exe_path = current_exe.to_string_lossy();
 
-    println!("{}", format!("  sudo setcap cap_net_raw+ep {}", exe_path).yellow());
+    println!(
+        "{}",
+        format!("  sudo setcap cap_net_raw+ep {}", exe_path).yellow()
+    );
     println!();
 
     if is_zh {
@@ -144,7 +158,11 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     let input = input.trim().to_lowercase();
 
     if input != "y" && !input.is_empty() && input != "yes" {
-        let msg = if is_zh { "用户取消操作" } else { "Operation cancelled by user" };
+        let msg = if is_zh {
+            "用户取消操作"
+        } else {
+            "Operation cancelled by user"
+        };
         return Err(anyhow::anyhow!("{}", msg));
     }
 
@@ -156,7 +174,11 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         .context("Failed to execute sudo")?;
 
     if !status.success() {
-        let msg = if is_zh { "授权失败" } else { "Authorization failed" };
+        let msg = if is_zh {
+            "授权失败"
+        } else {
+            "Authorization failed"
+        };
         return Err(anyhow::anyhow!("{}", msg));
     }
 
@@ -169,9 +191,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
 
     // Get current arguments and restart process
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let err = Command::new(current_exe)
-        .args(&args)
-        .exec();
+    let err = Command::new(current_exe).args(&args).exec();
 
     // exec only returns on failure
     Err(anyhow::anyhow!("Failed to restart process: {}", err))
@@ -182,65 +202,86 @@ pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> 
     Ok(())
 }
 
-pub fn detect_protocol(cli: &crate::cli::Cli, target: &str) -> Result<(crate::cli::Protocol, String)> {
+pub fn detect_protocol(
+    cli: &crate::cli::Cli,
+    target: &str,
+) -> Result<(crate::cli::Protocol, String)> {
     // 1. Force Mode
     if cli.ipv4 || cli.ipv6 {
         return Ok((crate::cli::Protocol::Icmp, target.to_string()));
     }
     if cli.tcp {
         if let Some((host, port_str)) = target.rsplit_once(':') {
-             let host = if host.starts_with('[') && host.ends_with(']') {
-                 &host[1..host.len()-1]
-             } else {
-                 host
-             };
+            let host = if host.starts_with('[') && host.ends_with(']') {
+                &host[1..host.len() - 1]
+            } else {
+                host
+            };
 
-             if let Ok(port) = port_str.parse::<u16>() {
-                 return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
-             }
+            if let Ok(port) = port_str.parse::<u16>() {
+                return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
+            }
         }
-        return Err(anyhow::anyhow!("TCP mode requires target format <host>:<port>"));
+        return Err(anyhow::anyhow!(
+            "TCP mode requires target format <host>:<port>"
+        ));
     }
     if cli.http {
-        let url_str = if target.starts_with("http") { target.to_string() } else { format!("http://{}", target) };
-        if let Ok(url) = reqwest::Url::parse(&url_str) 
-            && let Some(host) = url.host_str() {
-                return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
+        let url_str = if target.starts_with("http") {
+            target.to_string()
+        } else {
+            format!("http://{}", target)
+        };
+        if let Ok(url) = reqwest::Url::parse(&url_str)
+            && let Some(host) = url.host_str()
+        {
+            return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
         }
         // Fallback if parsing fails?
-        return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
+        return Ok((
+            crate::cli::Protocol::Http(target.to_string()),
+            target.to_string(),
+        ));
     }
 
     // 2. Auto Mode
     if target.starts_with("http://") || target.starts_with("https://") {
-         if let Ok(url) = reqwest::Url::parse(target) 
-            && let Some(host) = url.host_str() {
-                return Ok((crate::cli::Protocol::Http(target.to_string()), host.to_string()));
+        if let Ok(url) = reqwest::Url::parse(target)
+            && let Some(host) = url.host_str()
+        {
+            return Ok((
+                crate::cli::Protocol::Http(target.to_string()),
+                host.to_string(),
+            ));
         }
-        return Ok((crate::cli::Protocol::Http(target.to_string()), target.to_string()));
+        return Ok((
+            crate::cli::Protocol::Http(target.to_string()),
+            target.to_string(),
+        ));
     }
 
     // Check for TCP format (host:port)
-    if let Some((host, port_str)) = target.rsplit_once(':') 
-         && let Ok(port) = port_str.parse::<u16>() {
-             // Check if it's a valid IPv6 address (which contains colons)
-             if target.parse::<std::net::Ipv6Addr>().is_ok() {
-                 // It's a plain IPv6 address, so ICMP
-                 return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-             }
+    if let Some((host, port_str)) = target.rsplit_once(':')
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        // Check if it's a valid IPv6 address (which contains colons)
+        if target.parse::<std::net::Ipv6Addr>().is_ok() {
+            // It's a plain IPv6 address, so ICMP
+            return Ok((crate::cli::Protocol::Icmp, target.to_string()));
+        }
 
-             // Also check IPv4 just in case
-             if target.parse::<std::net::Ipv4Addr>().is_ok() {
-                 return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-             }
+        // Also check IPv4 just in case
+        if target.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Ok((crate::cli::Protocol::Icmp, target.to_string()));
+        }
 
-             let clean_host = if host.starts_with('[') && host.ends_with(']') {
-                 &host[1..host.len()-1]
-             } else {
-                 host
-             };
+        let clean_host = if host.starts_with('[') && host.ends_with(']') {
+            &host[1..host.len() - 1]
+        } else {
+            host
+        };
 
-             return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
+        return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
     }
 
     // Default ICMP
@@ -272,14 +313,18 @@ pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMa
                 if let Some((name_part, val_part)) = trimmed.split_once(':') {
                     // If we already had a header in progress, save it
                     if let Some(name) = current_header_name.take() {
-                        let value = HeaderValue::from_str(current_header_value.trim())
-                            .map_err(|e| anyhow::anyhow!("Invalid header value for '{}': {}", name, e))?;
+                        let value =
+                            HeaderValue::from_str(current_header_value.trim()).map_err(|e| {
+                                anyhow::anyhow!("Invalid header value for '{}': {}", name, e)
+                            })?;
                         headers.append(name, value);
                     }
 
                     // Start new header
-                    let name = HeaderName::from_bytes(name_part.trim().as_bytes())
-                        .map_err(|e| anyhow::anyhow!("Invalid header name '{}': {}", name_part, e))?;
+                    let name =
+                        HeaderName::from_bytes(name_part.trim().as_bytes()).map_err(|e| {
+                            anyhow::anyhow!("Invalid header name '{}': {}", name_part, e)
+                        })?;
                     current_header_name = Some(name);
                     current_header_value = val_part.to_string();
                 } else {
@@ -290,7 +335,10 @@ pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMa
                         }
                         current_header_value.push_str(trimmed);
                     } else {
-                        return Err(anyhow::anyhow!("Invalid header format: '{}'. Expected 'Name: Value'", trimmed));
+                        return Err(anyhow::anyhow!(
+                            "Invalid header format: '{}'. Expected 'Name: Value'",
+                            trimmed
+                        ));
                     }
                 }
             }
@@ -342,7 +390,7 @@ mod tests {
 
         let addrs = resolve_host("127.0.0.1", IpVersion::V4).await.unwrap();
         assert_eq!(addrs.len(), 1);
-        
+
         let res = resolve_host("127.0.0.1", IpVersion::V6).await;
         assert!(res.is_err());
 

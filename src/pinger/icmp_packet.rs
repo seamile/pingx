@@ -1,6 +1,6 @@
-use std::io::Cursor;
-use bytes::{Buf, BufMut, BytesMut};
 use anyhow::{Result, anyhow};
+use bytes::{Buf, BufMut, BytesMut};
+use std::io::Cursor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcmpType {
@@ -24,7 +24,11 @@ pub struct IcmpPacket {
 
 impl IcmpPacket {
     pub fn new_request(v6: bool, identifier: u16, sequence: u16, payload: Vec<u8>) -> Self {
-        let message_type = if v6 { IcmpType::EchoRequestV6 as u8 } else { IcmpType::EchoRequest as u8 };
+        let message_type = if v6 {
+            IcmpType::EchoRequestV6 as u8
+        } else {
+            IcmpType::EchoRequest as u8
+        };
         Self {
             message_type,
             code: 0,
@@ -51,7 +55,7 @@ impl IcmpPacket {
             packet[2] = (checksum >> 8) as u8;
             packet[3] = (checksum & 0xff) as u8;
         } else if self.message_type == IcmpType::EchoRequestV6 as u8 {
-             // IPv6 checksum handled by kernel for IPPROTO_ICMPV6
+            // IPv6 checksum handled by kernel for IPPROTO_ICMPV6
         }
 
         packet
@@ -105,7 +109,9 @@ mod tests {
 
     #[test]
     fn test_checksum() {
-        let data = vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x61, 0x62, 0x63, 0x64];
+        let data = vec![
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x61, 0x62, 0x63, 0x64,
+        ];
         let chk = calculate_checksum(&data);
         // Wireshark or online calc verification needed if complex, but standard algo is simple.
         // 0800 + 0000 + 0001 + 0001 + 6162 + 6364 = ...
