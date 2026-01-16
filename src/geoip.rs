@@ -245,6 +245,35 @@ pub struct GeoRecord {
     pub longitude: f32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_config_dir() {
+        let dir = get_config_dir();
+        assert!(dir.is_ok());
+        let path = dir.unwrap();
+        assert!(path.ends_with(".config/pingx"));
+    }
+
+    #[test]
+    fn test_geo_ip_manager_new_no_db() {
+        // This test assumes databases might not exist in the test environment, 
+        // or checks graceful fallback.
+        // Since we can't easily mock file system existence for integration tests without temp dirs,
+        // we check if it returns Ok regardless (it returns Ok with None dbs).
+        let manager = GeoIpManager::new();
+        assert!(manager.is_ok());
+        let _manager = manager.unwrap();
+        // If DBs missing, these should be None
+        // We can't assert strict None/Some because local dev env might have them.
+        // But we can check lookup returns None if we force empty manager
+        let empty_manager = GeoIpManager { db_v4: None, db_v6: None };
+        assert!(empty_manager.lookup("8.8.8.8".parse().unwrap()).is_none());
+    }
+}
+
 fn get_config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not find home directory"))?;
     Ok(home.join(".config").join("pingx"))

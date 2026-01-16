@@ -422,6 +422,8 @@ mod tests {
             tcp: false,
             http: false,
             headers: vec![],
+            geo: false,
+            fetch_geo: false,
         };
 
         // 1. Basic ICMP (Domain)
