@@ -1,11 +1,12 @@
 mod cli;
+mod config;
 mod geoip;
 mod happy_eyeballs;
 mod pinger;
 mod session;
 mod utils;
 
-use clap::{Parser, CommandFactory};
+use clap::{CommandFactory, Parser};
 use cli::Cli;
 use session::Session;
 

@@ -308,15 +308,18 @@ impl Session {
         // JSON Output Logic
         if let Some(json_arg) = &self.cli.json {
             let mut json_results = Vec::new();
-            
+
             for target_host in targets {
                 if let Some(stats) = all_stats.get(target_host) {
-                    let protocol = target_protocols.get(target_host).unwrap_or(&crate::cli::Protocol::Icmp);
+                    let protocol = target_protocols
+                        .get(target_host)
+                        .unwrap_or(&crate::cli::Protocol::Icmp);
                     let protocol_str = match protocol {
                         crate::cli::Protocol::Icmp => "ICMP",
                         crate::cli::Protocol::Tcp(_) => "TCP",
                         crate::cli::Protocol::Http(_) => "HTTP",
-                    }.to_string();
+                    }
+                    .to_string();
 
                     // Calculate stats
                     let loss = if stats.transmitted > 0 {
@@ -325,20 +328,25 @@ impl Session {
                         0.0
                     };
                     let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
-                    
+
                     let (min, max, avg, mdev, jitter) = if stats.received > 0 {
                         let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
                         let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-                        let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0 / stats.rtts.len() as f64;
-                        
+                        let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0
+                            / stats.rtts.len() as f64;
+
                         let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-                        let sum_sq_diff: f64 = stats.rtts.iter()
+                        let sum_sq_diff: f64 = stats
+                            .rtts
+                            .iter()
                             .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
                             .sum();
                         let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
 
                         let jitter = if stats.rtts.len() > 1 {
-                             let sum_diff: f64 = stats.rtts.windows(2)
+                            let sum_diff: f64 = stats
+                                .rtts
+                                .windows(2)
                                 .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
                                 .sum();
                             sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
@@ -364,12 +372,8 @@ impl Session {
                         ttl: self.cli.ttl,
                         sent: stats.transmitted,
                         received: stats.received,
-                        loss: (loss * 1000.0).round() / 1000.0, // Also round loss? Or keep precision? Instructions said "time values".
-                                                               // Let's stick to time values for strict compliance, 
-                                                               // but usually nice to format loss too.
-                                                               // Re-reading: "json 中的各项时间保留 3 位小数" -> time values only.
-                                                               // Loss is percentage. I will round time values.
-                        time: (total_time * 1000.0).round() / 1000.0, 
+                        loss: (loss * 1000.0).round() / 1000.0,
+                        time: (total_time * 1000.0).round() / 1000.0,
                         min,
                         avg,
                         max,
@@ -390,7 +394,7 @@ impl Session {
                 if let Ok(mut file) = std::fs::File::create(path) {
                     let _ = file.write_all(json_output.as_bytes());
                 } else {
-                     eprintln!("pingx: Failed to write JSON to {}", path);
+                    eprintln!("pingx: Failed to write JSON to {}", path);
                 }
             } else {
                 println!("{}", json_output);

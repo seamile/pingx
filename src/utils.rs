@@ -293,61 +293,65 @@ pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMa
     let mut headers = HeaderMap::new();
 
     for raw in raw_headers {
-        // First split by newline
         for line in raw.split('\n') {
-            if line.trim().is_empty() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
 
-            // Split by semicolon for potential multiple headers in one line
-            let segments: Vec<&str> = line.split(';').collect();
-            let mut current_header_name: Option<HeaderName> = None;
-            let mut current_header_value = String::new();
-
-            for segment in segments {
-                let trimmed = segment.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                if let Some((name_part, val_part)) = trimmed.split_once(':') {
-                    // If we already had a header in progress, save it
-                    if let Some(name) = current_header_name.take() {
-                        let value =
-                            HeaderValue::from_str(current_header_value.trim()).map_err(|e| {
-                                anyhow::anyhow!("Invalid header value for '{}': {}", name, e)
-                            })?;
-                        headers.append(name, value);
+            // Split by ';' but respect double quotes
+            let mut segments = Vec::new();
+            let mut current = String::new();
+            let mut in_quotes = false;
+            for c in line.chars() {
+                match c {
+                    '"' => {
+                        in_quotes = !in_quotes;
+                        current.push(c);
                     }
-
-                    // Start new header
-                    let name =
-                        HeaderName::from_bytes(name_part.trim().as_bytes()).map_err(|e| {
-                            anyhow::anyhow!("Invalid header name '{}': {}", name_part, e)
-                        })?;
-                    current_header_name = Some(name);
-                    current_header_value = val_part.to_string();
-                } else {
-                    // No colon, append to previous value if exists (heuristic for semicolons in values)
-                    if current_header_name.is_some() {
-                        if !current_header_value.is_empty() {
-                            current_header_value.push_str("; ");
-                        }
-                        current_header_value.push_str(trimmed);
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Invalid header format: '{}'. Expected 'Name: Value'",
-                            trimmed
-                        ));
+                    ';' if !in_quotes => {
+                        segments.push(current.trim().to_string());
+                        current = String::new();
                     }
+                    _ => current.push(c),
                 }
             }
+            if !current.trim().is_empty() {
+                segments.push(current.trim().to_string());
+            }
 
-            // Save final header in line
-            if let Some(name) = current_header_name {
-                let value = HeaderValue::from_str(current_header_value.trim())
-                    .map_err(|e| anyhow::anyhow!("Invalid header value for '{}': {}", name, e))?;
-                headers.append(name, value);
+            for segment in segments {
+                if let Some((name_part, val_part)) = segment.split_once(':') {
+                    let name = HeaderName::from_bytes(name_part.trim().as_bytes()).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Invalid header name '{}' in segment '{}': {}\nCorrect format: 'Name: Value'",
+                            name_part.trim(),
+                            segment,
+                            e
+                        )
+                    })?;
+
+                    let mut val = val_part.trim().to_string();
+                    // Strip quotes if they wrap the entire value
+                    if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                        val = val[1..val.len() - 1].to_string();
+                    }
+
+                    let value = HeaderValue::from_str(&val).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Invalid header value '{}' for '{}': {}\nCorrect format: 'Name: Value'",
+                            val,
+                            name,
+                            e
+                        )
+                    })?;
+                    headers.append(name, value);
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Invalid header format: '{}'.\nCorrect format is 'Name: Value'. Multiple headers can be separated by ';'.\nExample: --header \"Cookie: k=v; Authorization: Bearer token\"",
+                        segment
+                    ));
+                }
             }
         }
     }
@@ -364,7 +368,7 @@ mod tests {
         let raw = vec![
             "X-Test: 123".to_string(),
             "A: 1; B: 2".to_string(),
-            "Cookie: session=abc; user=xyz".to_string(),
+            "Cookie: \"session=abc; user=xyz\"".to_string(),
             "Multi:\n  Line: value".to_string(),
         ];
         let headers = parse_headers(&raw).unwrap();
@@ -378,7 +382,13 @@ mod tests {
     #[test]
     fn test_parse_headers_invalid() {
         let raw = vec!["Invalid".to_string()];
-        assert!(parse_headers(&raw).is_err());
+        let res = parse_headers(&raw);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Correct format is 'Name: Value'")
+        );
     }
 
     #[tokio::test]
