@@ -433,12 +433,16 @@ pub fn print_geo_table(records: &[GeoRecord]) {
     let mut w_country = "Country".len();
     let mut w_region = "Region".len();
     let mut w_city = "City".len();
+    let mut w_lat = "Latitude".len();
+    let mut w_lon = "Longitude".len();
 
     for r in records {
         w_ip = w_ip.max(r.ip.to_string().len());
         w_country = w_country.max(r.country.len());
         w_region = w_region.max(r.region.len());
         w_city = w_city.max(r.city.len());
+        w_lat = w_lat.max(format!("{:.6}", r.latitude).len());
+        w_lon = w_lon.max(format!("{:.6}", r.longitude).len());
     }
 
     // Print Header
@@ -448,14 +452,14 @@ pub fn print_geo_table(records: &[GeoRecord]) {
         format!("{:>width$}", "Country", width = w_country).bold(),
         format!("{:>width$}", "Region", width = w_region).bold(),
         format!("{:>width$}", "City", width = w_city).bold(),
-        format!("{:>10}", "Latitude").bold(),
-        format!("{:>10}", "Longitude").bold(),
+        format!("{:>width$}", "Latitude", width = w_lat).bold(),
+        format!("{:>width$}", "Longitude", width = w_lon).bold(),
     );
 
     // Print Rows
     for r in records {
         println!(
-            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>10.6} | {:>10.6}",
+            "{:<w_ip$} | {:>w_country$} | {:>w_region$} | {:>w_city$} | {:>w_lat$.6} | {:>w_lon$.6}",
             r.ip,
             r.country,
             r.region,
@@ -465,7 +469,9 @@ pub fn print_geo_table(records: &[GeoRecord]) {
             w_ip = w_ip,
             w_country = w_country,
             w_region = w_region,
-            w_city = w_city
+            w_city = w_city,
+            w_lat = w_lat,
+            w_lon = w_lon
         );
     }
 }
