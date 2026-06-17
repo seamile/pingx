@@ -11,6 +11,7 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 3. **Concurrency**: Probe multiple targets simultaneously.
 4. **GeoIP**: Retrieve geographical location (country, region, city, coordinates) for IP addresses.
 5. **JSON Output**: Export results to JSON for machine readability.
+6. **Interface Binding**: Bind all probes to a specific network interface (e.g., `en0`, `eth0`, `utun1`).
 
 ## Installation
 
@@ -81,6 +82,20 @@ pingx -4 example.com
 pingx -T example.com:443
 ```
 
+### Interface Binding
+
+Specify which network interface to send probes through (e.g., `en0`, `eth0`, `utun1`):
+
+```shell
+# ICMP via en0
+pingx -I en0 223.5.5.5
+
+# TCP via utun1
+pingx --interface utun1 223.5.5.5:443
+```
+
+**Note**: On macOS, all protocol modes (ICMP/TCP/HTTP) support interface binding. On Linux, ICMP/TCP binding is fully supported via `SO_BINDTODEVICE`; HTTP is supported with `local_address()` (source IP binding, best-effort). Windows is not supported.
+
 ### Concurrent Probing
 
 Supports probing multiple targets simultaneously. Results are displayed interleaved unless quiet mode (`-q`) is enabled.
@@ -124,6 +139,7 @@ pingx -g 8.8.8.8 --json
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
 - `-t <TTL>`: Set the IP Time to Live (default 64).
 - `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
+- `-I <IFACE>`: Specify network interface to bind to (e.g., `en0`, `eth0`, `utun1`).
 - `-q`: Quiet output. Only displays summary statistics.
 
 ---
@@ -141,6 +157,7 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 3. **并发探测**: 支持同时对多个目标发起探测。
 4. **GeoIP 信息**: 获取 IP 地址的物理地理位置（国家、地区、城市、经纬度）。
 5. **JSON 输出**: 支持将探测或定位结果以 JSON 格式输出，方便集成。
+6. **网卡绑定**: 将探测流量绑定到指定网络接口（如 `en0`、`eth0`、`utun1`）。
 
 ## 安装
 
@@ -212,6 +229,20 @@ pingx -4 example.com
 pingx -T example.com:443
 ```
 
+### 网卡绑定
+
+指定探测流量从哪个网络接口发送（如 `en0`、`eth0`、`utun1`）：
+
+```shell
+# ICMP 通过 en0
+pingx -I en0 223.5.5.5
+
+# TCP 通过 utun1
+pingx --interface utun1 223.5.5.5:443
+```
+
+**注意**：macOS 下所有协议模式（ICMP/TCP/HTTP）均支持网卡绑定。Linux 下 ICMP/TCP 通过 `SO_BINDTODEVICE` 完整支持，HTTP 通过 `local_address()` 绑定源 IP（尽力而为）。Windows 暂不支持。
+
 ### 并发探测
 
 pingx 可以并发对多个目标以不同协议进行检测。结果将交替显示，除非开启安静模式 (`-q`)。
@@ -255,4 +286,5 @@ pingx -g 8.8.8.8 --json
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
 - `-s <SIZE>`: ICMP 数据包大小（默认 56 字节）。
+- `-I <IFACE>`: 指定探测流量从哪个网卡接口发送（如 `en0`、`eth0`、`utun1`）。
 - `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。
