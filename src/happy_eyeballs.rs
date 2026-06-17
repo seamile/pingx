@@ -5,7 +5,6 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, Sleep, sleep};
 
@@ -154,7 +153,7 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
 
 async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
     let socket_addr = SocketAddr::new(addr, port);
-    tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(socket_addr))
+    tokio::time::timeout(PROBE_TIMEOUT, crate::utils::connect_tcp(socket_addr))
         .await
         .context("Timeout")?
         .context("Connection failed")?;

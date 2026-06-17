@@ -19,6 +19,8 @@ async fn main() {
 
     let args = Cli::parse();
 
+    utils::set_bind_interface(args.interface.clone());
+
     // GeoIP Fetch
     if args.fetch_geo {
         let mut geo_manager = match geoip::GeoIpManager::new() {

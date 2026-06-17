@@ -29,6 +29,17 @@ impl HttpPinger {
             .timeout(timeout)
             .danger_accept_invalid_certs(true);
 
+        if let Some(iface) = crate::utils::get_bind_interface() {
+            if let Some(ip) = crate::utils::get_interface_ip(iface) {
+                builder = builder.local_address(ip);
+            } else {
+                eprintln!(
+                    "pingx: warning: no non-loopback IP found on interface '{}', HTTP will use default routing",
+                    iface
+                );
+            }
+        }
+
         if let Some(host) = target_url.host_str() {
             let port = target_url.port_or_known_default().unwrap_or(80);
             builder = builder.resolve(host, SocketAddr::new(target_ip, port));

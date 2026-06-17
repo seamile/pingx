@@ -16,6 +16,7 @@ debug
 # AI Tools
 .gemini/
 .geminiignore
+.kilo/
 .kilocode/
 .specify/
 specs/

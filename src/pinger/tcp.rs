@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 
 pub struct TcpPinger {
@@ -57,7 +56,7 @@ impl Pinger for TcpPinger {
 
         tokio::spawn(async move {
             let start = Instant::now();
-            let connect_future = TcpStream::connect(addr);
+            let connect_future = crate::utils::connect_tcp(addr);
             let result = tokio::time::timeout(timeout, connect_future).await;
 
             let status = match result {

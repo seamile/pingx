@@ -36,6 +36,10 @@ pub struct Cli {
     #[arg(short = 'q')]
     pub quiet: bool,
 
+    /// Network interface to bind to.
+    #[arg(short = 'I', long = "interface", value_name = "IFACE")]
+    pub interface: Option<String>,
+
     // Mode Flags (Mutually Exclusive via 'mode' group)
     /// Force IPv4 ICMP ping.
     #[arg(short = '4', group = "mode")]

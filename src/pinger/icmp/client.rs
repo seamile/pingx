@@ -35,6 +35,10 @@ impl AsyncSocket {
     pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
         let (sock_type, socket) = Self::create_socket(v6)?;
 
+        if let Some(iface) = crate::utils::get_bind_interface() {
+            crate::utils::bind_socket_to_interface(&socket, iface, v6)?;
+        }
+
         socket.set_nonblocking(true)?;
 
         if v6 {
@@ -85,6 +89,10 @@ impl AsyncSocket {
     #[cfg(not(unix))]
     pub fn new(v6: bool, ttl: u32) -> io::Result<Self> {
         let (sock_type, socket) = Self::create_socket(v6)?;
+
+        if let Some(iface) = crate::utils::get_bind_interface() {
+            crate::utils::bind_socket_to_interface(&socket, iface, v6)?;
+        }
 
         socket.set_nonblocking(true)?;
 

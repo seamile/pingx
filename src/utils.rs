@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use colored::Colorize;
-use std::net::IpAddr;
-use tokio::net::lookup_host;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::OnceLock;
+use tokio::net::{lookup_host, TcpStream};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IpVersion {
@@ -47,6 +49,142 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
     }
 
     Ok(resolved_addrs)
+}
+
+static BIND_INTERFACE: OnceLock<Option<String>> = OnceLock::new();
+
+pub fn set_bind_interface(iface: Option<String>) {
+    let _ = BIND_INTERFACE.set(iface);
+}
+
+pub fn get_bind_interface() -> Option<&'static str> {
+    BIND_INTERFACE.get().and_then(|v| v.as_deref())
+}
+
+#[cfg(unix)]
+fn interface_name_to_index(name: &str) -> io::Result<std::num::NonZeroU32> {
+    use std::ffi::CString;
+    let cname = CString::new(name).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "interface name contains null byte")
+    })?;
+    let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if index == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::num::NonZeroU32::new(index)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface not found"))
+}
+
+#[cfg(unix)]
+pub fn bind_socket_to_interface(
+    socket: &socket2::Socket,
+    iface: &str,
+    is_ipv6: bool,
+) -> io::Result<()> {
+    let idx = interface_name_to_index(iface)?;
+    if is_ipv6 {
+        socket.bind_device_by_index_v6(Some(idx))
+    } else {
+        socket.bind_device_by_index_v4(Some(idx))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn bind_socket_to_interface(
+    _socket: &socket2::Socket,
+    _iface: &str,
+    _is_ipv6: bool,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interface binding is not supported on this platform",
+    ))
+}
+
+pub async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
+    if let Some(iface) = get_bind_interface() {
+        connect_tcp_bound(addr, iface).await
+    } else {
+        TcpStream::connect(addr).await
+    }
+}
+
+#[cfg(unix)]
+async fn connect_tcp_bound(addr: SocketAddr, iface: &str) -> io::Result<TcpStream> {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    bind_socket_to_interface(&socket, iface, addr.is_ipv6())?;
+    socket.set_tcp_nodelay(true)?;
+    socket.set_nonblocking(true)?;
+    let sockaddr: SockAddr = addr.into();
+    match socket.connect(&sockaddr) {
+        Ok(()) => {}
+        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Err(e) => return Err(e),
+    }
+    let stream: std::net::TcpStream = socket.into();
+    TcpStream::from_std(stream)
+}
+
+#[cfg(not(unix))]
+async fn connect_tcp_bound(_addr: SocketAddr, _iface: &str) -> io::Result<TcpStream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interface binding is not supported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+pub fn get_interface_ip(iface: &str) -> Option<IpAddr> {
+    let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut ifaddrs) } != 0 {
+        return None;
+    }
+    let mut current = ifaddrs;
+    let mut result = None;
+    while !current.is_null() {
+        unsafe {
+            let ifa = &*current;
+            let name_ptr = ifa.ifa_name;
+            if !name_ptr.is_null()
+                    && let Ok(name) = std::ffi::CStr::from_ptr(name_ptr).to_str()
+                    && name == iface
+                {
+                    let addr = ifa.ifa_addr;
+                    if !addr.is_null() {
+                        let family = (*addr).sa_family as libc::c_int;
+                        if family == libc::AF_INET {
+                            let sin = &*(addr as *const libc::sockaddr_in);
+                            let ip =
+                                std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_be());
+                            if !ip.is_loopback() && result.is_none() {
+                                result = Some(IpAddr::V4(ip));
+                            }
+                        } else if family == libc::AF_INET6 {
+                            let sin6 = &*(addr as *const libc::sockaddr_in6);
+                            let ip =
+                                std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                            if !ip.is_loopback() && result.is_none() {
+                                result = Some(IpAddr::V6(ip));
+                            }
+                        }
+                    }
+                }
+            current = (*current).ifa_next;
+        }
+    }
+    unsafe { libc::freeifaddrs(ifaddrs); }
+    result
+}
+
+#[cfg(not(unix))]
+pub fn get_interface_ip(_iface: &str) -> Option<IpAddr> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -435,6 +573,7 @@ mod tests {
             geo: false,
             fetch_geo: false,
             json: None,
+            interface: None,
         };
 
         // 1. Basic ICMP (Domain)
