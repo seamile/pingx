@@ -128,7 +128,9 @@ async fn connect_tcp_bound(addr: SocketAddr, iface: &str) -> io::Result<TcpStrea
         Err(e) => return Err(e),
     }
     let stream: std::net::TcpStream = socket.into();
-    TcpStream::from_std(stream)
+    let tokio_stream = TcpStream::from_std(stream)?;
+    tokio_stream.writable().await?;
+    Ok(tokio_stream)
 }
 
 #[cfg(not(unix))]
