@@ -16,27 +16,27 @@ name = "pingx"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.49.0", features = ["full"] }
-clap = { version = "4.5.54", features = ["derive"] }
-reqwest = { version = "0.13.1", features = ["rustls"], default-features = false }
-anyhow = "1.0.100"
-thiserror = "2.0.17"
-async-trait = "0.1.89"
-futures = "0.3.31"
-socket2 = { version = "0.6.1", features = ["all"] }
-bytes = "1.11.0"
+tokio = { version = "1.53.1", features = ["full"] }
+clap = { version = "4.6.6", features = ["derive"] }
+reqwest = { version = "0.13.4", features = ["rustls"], default-features = false }
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+async-trait = "0.1.92"
+futures = "0.3.34"
+socket2 = { version = "0.6.5", features = ["all"] }
+bytes = "1.12.1"
 colored = "3.1.1"
 parking_lot = "0.12.5"
-libc = "0.2.180"
-ip2location = "0.6.0"
+libc = "0.2.189"
+ip2location = "0.6.1"
 dirs = "6.0.0"
-zip = "7.1.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-toml = "0.9.11"
+zip = "8.6.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.5+spec-1.1.0"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
@@ -44,7 +44,8 @@ strip = true
 
 [profile.dev]
 opt-level = 0
-debug = 1 # Only line tables, faster linking and smaller files
+debug = 1
+codegen-units = 256
 
 # Optimize dependencies even in dev builds.
 # This makes build scripts and procedural macros run faster.

@@ -18,6 +18,7 @@ debug
 .geminiignore
 .kilo/
 .kilocode/
+.serena/
 .specify/
 specs/
 openspec/
