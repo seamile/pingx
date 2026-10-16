@@ -23,6 +23,7 @@ anyhow = "1.0.104"
 thiserror = "2.0.20"
 async-trait = "0.1.92"
 futures = "0.3.34"
+hickory-resolver = "0.26.3"
 socket2 = { version = "0.6.5", features = ["all"] }
 bytes = "1.12.1"
 colored = "3.1.1"
@@ -33,7 +34,7 @@ dirs = "6.0.0"
 zip = "8.6.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-toml = "1.1.5+spec-1.1.0"
+toml = "1.1.5"
 
 [profile.release]
 opt-level = 3

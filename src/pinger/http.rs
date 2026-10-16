@@ -30,14 +30,7 @@ impl HttpPinger {
             .danger_accept_invalid_certs(true);
 
         if let Some(iface) = crate::utils::get_bind_interface() {
-            if let Some(ip) = crate::utils::get_interface_ip(iface) {
-                builder = builder.local_address(ip);
-            } else {
-                eprintln!(
-                    "pingx: warning: no non-loopback IP found on interface '{}', HTTP will use default routing",
-                    iface
-                );
-            }
+            builder = builder.interface(iface).no_proxy();
         }
 
         if let Some(host) = target_url.host_str() {
@@ -45,7 +38,7 @@ impl HttpPinger {
             builder = builder.resolve(host, SocketAddr::new(target_ip, port));
         }
 
-        let client = builder.build().unwrap_or_else(|_| Client::new());
+        let client = builder.build().expect("failed to build bound HTTP client");
 
         Self {
             target_name,

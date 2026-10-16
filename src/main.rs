@@ -19,6 +19,15 @@ async fn main() {
 
     let args = Cli::parse();
 
+    if let Some(iface) = args.interface.as_deref()
+        && utils::get_interface_ip(iface).is_none()
+    {
+        eprintln!(
+            "pingx: interface '{}' has no usable non-loopback address",
+            iface
+        );
+        std::process::exit(1);
+    }
     utils::set_bind_interface(args.interface.clone());
 
     // GeoIP Fetch

@@ -172,7 +172,11 @@ impl GeoIpManager {
         need_v4: bool,
         need_v6: bool,
     ) -> Result<()> {
-        let client = Client::new();
+        let mut client_builder = Client::builder();
+        if let Some(iface) = crate::utils::get_bind_interface() {
+            client_builder = client_builder.interface(iface).no_proxy();
+        }
+        let client = client_builder.build()?;
         let config_dir = self.config_manager.get_config_dir();
 
         if need_v4 {

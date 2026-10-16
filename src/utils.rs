@@ -4,7 +4,7 @@ use colored::Colorize;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::TcpStream;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IpVersion {
@@ -27,12 +27,15 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
         }
     }
 
-    // Resolve domain (assume port 0 as we only need IP)
-    let addrs = lookup_host(format!("{}:0", host))
-        .await
-        .context(format!("Failed to resolve host: {}", host))?;
-
-    let mut resolved_addrs: Vec<IpAddr> = addrs.map(|socket_addr| socket_addr.ip()).collect();
+    let mut resolved_addrs = if let Some(iface) = get_bind_interface() {
+        resolve_host_on_interface(host, iface).await?
+    } else {
+        tokio::net::lookup_host(format!("{}:0", host))
+            .await
+            .context(format!("Failed to resolve host: {}", host))?
+            .map(|socket_addr| socket_addr.ip())
+            .collect()
+    };
 
     // Filter based on version
     match version {
@@ -51,6 +54,52 @@ pub async fn resolve_host(host: &str, version: IpVersion) -> Result<Vec<IpAddr>>
     Ok(resolved_addrs)
 }
 
+async fn resolve_host_on_interface(host: &str, iface: &str) -> Result<Vec<IpAddr>> {
+    use hickory_resolver::TokioResolver;
+    use hickory_resolver::config::ResolverConfig;
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    use hickory_resolver::system_conf;
+
+    let source_ip = get_interface_ip(iface)
+        .ok_or_else(|| anyhow::anyhow!("interface '{}' has no usable IP address", iface))?;
+    let (mut config, options) =
+        system_conf::read_system_conf().context("failed to read system DNS configuration")?;
+    if config.name_servers().is_empty() {
+        return Err(anyhow::anyhow!(
+            "system DNS configuration has no nameservers"
+        ));
+    }
+    for server in &mut config.name_servers {
+        if server.ip.is_ipv4() != source_ip.is_ipv4() {
+            return Err(anyhow::anyhow!(
+                "DNS server {} cannot be reached from the selected interface address {}",
+                server.ip,
+                source_ip
+            ));
+        }
+        for connection in &mut server.connections {
+            connection.bind_addr = Some(SocketAddr::new(source_ip, 0));
+        }
+    }
+    let resolver = TokioResolver::builder_with_config(
+        ResolverConfig::from_parts(
+            config.domain().cloned(),
+            config.search().to_vec(),
+            config.name_servers().to_vec(),
+        ),
+        TokioRuntimeProvider::default(),
+    )
+    .with_options(options)
+    .build()?;
+    let lookup = resolver.lookup_ip(host).await.with_context(|| {
+        format!(
+            "failed to resolve host '{}' via interface '{}':",
+            host, iface
+        )
+    })?;
+    Ok(lookup.iter().collect())
+}
+
 static BIND_INTERFACE: OnceLock<Option<String>> = OnceLock::new();
 
 pub fn set_bind_interface(iface: Option<String>) {
@@ -65,7 +114,10 @@ pub fn get_bind_interface() -> Option<&'static str> {
 fn interface_name_to_index(name: &str) -> io::Result<std::num::NonZeroU32> {
     use std::ffi::CString;
     let cname = CString::new(name).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "interface name contains null byte")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "interface name contains null byte",
+        )
     })?;
     let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
     if index == 0 {
@@ -154,33 +206,33 @@ pub fn get_interface_ip(iface: &str) -> Option<IpAddr> {
             let ifa = &*current;
             let name_ptr = ifa.ifa_name;
             if !name_ptr.is_null()
-                    && let Ok(name) = std::ffi::CStr::from_ptr(name_ptr).to_str()
-                    && name == iface
-                {
-                    let addr = ifa.ifa_addr;
-                    if !addr.is_null() {
-                        let family = (*addr).sa_family as libc::c_int;
-                        if family == libc::AF_INET {
-                            let sin = &*(addr as *const libc::sockaddr_in);
-                            let ip =
-                                std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_be());
-                            if !ip.is_loopback() && result.is_none() {
-                                result = Some(IpAddr::V4(ip));
-                            }
-                        } else if family == libc::AF_INET6 {
-                            let sin6 = &*(addr as *const libc::sockaddr_in6);
-                            let ip =
-                                std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                            if !ip.is_loopback() && result.is_none() {
-                                result = Some(IpAddr::V6(ip));
-                            }
+                && let Ok(name) = std::ffi::CStr::from_ptr(name_ptr).to_str()
+                && name == iface
+            {
+                let addr = ifa.ifa_addr;
+                if !addr.is_null() {
+                    let family = (*addr).sa_family as libc::c_int;
+                    if family == libc::AF_INET {
+                        let sin = &*(addr as *const libc::sockaddr_in);
+                        let ip = std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_be());
+                        if !ip.is_loopback() && result.is_none() {
+                            result = Some(IpAddr::V4(ip));
+                        }
+                    } else if family == libc::AF_INET6 {
+                        let sin6 = &*(addr as *const libc::sockaddr_in6);
+                        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                        if !ip.is_loopback() && result.is_none() {
+                            result = Some(IpAddr::V6(ip));
                         }
                     }
                 }
+            }
             current = (*current).ifa_next;
         }
     }
-    unsafe { libc::freeifaddrs(ifaddrs); }
+    unsafe {
+        libc::freeifaddrs(ifaddrs);
+    }
     result
 }
 
