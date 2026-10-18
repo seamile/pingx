@@ -60,8 +60,7 @@ async fn resolve_host_on_interface(host: &str, iface: &str) -> Result<Vec<IpAddr
     use hickory_resolver::net::runtime::TokioRuntimeProvider;
     use hickory_resolver::system_conf;
 
-    let source_ip = get_interface_ip(iface)
-        .ok_or_else(|| anyhow::anyhow!("interface '{}' has no usable IP address", iface))?;
+    let source_ips = get_interface_ips(iface);
     let (mut config, options) =
         system_conf::read_system_conf().context("failed to read system DNS configuration")?;
     if config.name_servers().is_empty() {
@@ -69,18 +68,8 @@ async fn resolve_host_on_interface(host: &str, iface: &str) -> Result<Vec<IpAddr
             "system DNS configuration has no nameservers"
         ));
     }
-    for server in &mut config.name_servers {
-        if server.ip.is_ipv4() != source_ip.is_ipv4() {
-            return Err(anyhow::anyhow!(
-                "DNS server {} cannot be reached from the selected interface address {}",
-                server.ip,
-                source_ip
-            ));
-        }
-        for connection in &mut server.connections {
-            connection.bind_addr = Some(SocketAddr::new(source_ip, 0));
-        }
-    }
+    bind_dns_servers(&mut config, &source_ips)
+        .with_context(|| format!("cannot use system DNS via interface '{}'", iface))?;
     let resolver = TokioResolver::builder_with_config(
         ResolverConfig::from_parts(
             config.domain().cloned(),
@@ -98,6 +87,29 @@ async fn resolve_host_on_interface(host: &str, iface: &str) -> Result<Vec<IpAddr
         )
     })?;
     Ok(lookup.iter().collect())
+}
+
+fn bind_dns_servers(
+    config: &mut hickory_resolver::config::ResolverConfig,
+    source_ips: &[IpAddr],
+) -> Result<()> {
+    config.name_servers.retain_mut(|server| {
+        let Some(&source_ip) = source_ips.iter().find(|ip| {
+            ip.is_ipv4() == server.ip.is_ipv4()
+                && !matches!(ip, IpAddr::V6(ip) if ip.is_unicast_link_local())
+        }) else {
+            return false;
+        };
+        for connection in &mut server.connections {
+            connection.bind_addr = Some(SocketAddr::new(source_ip, 0));
+        }
+        true
+    });
+    anyhow::ensure!(
+        !config.name_servers.is_empty(),
+        "no DNS server has a matching usable interface address"
+    );
+    Ok(())
 }
 
 static BIND_INTERFACE: OnceLock<Option<String>> = OnceLock::new();
@@ -194,13 +206,13 @@ async fn connect_tcp_bound(_addr: SocketAddr, _iface: &str) -> io::Result<TcpStr
 }
 
 #[cfg(unix)]
-pub fn get_interface_ip(iface: &str) -> Option<IpAddr> {
+pub fn get_interface_ips(iface: &str) -> Vec<IpAddr> {
     let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut ifaddrs) } != 0 {
-        return None;
+        return Vec::new();
     }
     let mut current = ifaddrs;
-    let mut result = None;
+    let mut result = Vec::new();
     while !current.is_null() {
         unsafe {
             let ifa = &*current;
@@ -215,14 +227,14 @@ pub fn get_interface_ip(iface: &str) -> Option<IpAddr> {
                     if family == libc::AF_INET {
                         let sin = &*(addr as *const libc::sockaddr_in);
                         let ip = std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_be());
-                        if !ip.is_loopback() && result.is_none() {
-                            result = Some(IpAddr::V4(ip));
+                        if !ip.is_loopback() && !ip.is_unspecified() {
+                            result.push(IpAddr::V4(ip));
                         }
                     } else if family == libc::AF_INET6 {
                         let sin6 = &*(addr as *const libc::sockaddr_in6);
                         let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                        if !ip.is_loopback() && result.is_none() {
-                            result = Some(IpAddr::V6(ip));
+                        if !ip.is_loopback() && !ip.is_unspecified() {
+                            result.push(IpAddr::V6(ip));
                         }
                     }
                 }
@@ -237,8 +249,8 @@ pub fn get_interface_ip(iface: &str) -> Option<IpAddr> {
 }
 
 #[cfg(not(unix))]
-pub fn get_interface_ip(_iface: &str) -> Option<IpAddr> {
-    None
+pub fn get_interface_ips(_iface: &str) -> Vec<IpAddr> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -554,6 +566,33 @@ pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bind_dns_servers_matches_address_families() {
+        use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+
+        let ipv4 = "172.20.10.3".parse::<IpAddr>().unwrap();
+        let ipv6 = "2001:db8::3".parse::<IpAddr>().unwrap();
+        let link_local = "fe80::1468:5da3:36e1:2b81".parse().unwrap();
+        let mut config = ResolverConfig::default();
+        config.name_servers = vec![
+            NameServerConfig::udp_and_tcp("223.5.5.5".parse().unwrap()),
+            NameServerConfig::udp_and_tcp("2001:db8::53".parse().unwrap()),
+        ];
+        let mut dual_stack = config.clone();
+        bind_dns_servers(&mut dual_stack, &[link_local, ipv4, ipv6]).unwrap();
+        assert_eq!(dual_stack.name_servers.len(), 2);
+        for (server, source) in dual_stack.name_servers.iter().zip([ipv4, ipv6]) {
+            for connection in &server.connections {
+                assert_eq!(connection.bind_addr, Some(SocketAddr::new(source, 0)));
+            }
+        }
+
+        bind_dns_servers(&mut config, &[link_local, ipv4]).unwrap();
+        assert_eq!(config.name_servers.len(), 1);
+        assert!(config.name_servers[0].ip.is_ipv4());
+        assert!(bind_dns_servers(&mut config, &[link_local]).is_err());
+    }
 
     #[test]
     fn test_parse_headers() {

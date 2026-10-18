@@ -29,6 +29,7 @@ impl HttpPinger {
             .timeout(timeout)
             .danger_accept_invalid_certs(true);
 
+        #[cfg(unix)]
         if let Some(iface) = crate::utils::get_bind_interface() {
             builder = builder.interface(iface).no_proxy();
         }

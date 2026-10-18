@@ -172,10 +172,13 @@ impl GeoIpManager {
         need_v4: bool,
         need_v6: bool,
     ) -> Result<()> {
-        let mut client_builder = Client::builder();
-        if let Some(iface) = crate::utils::get_bind_interface() {
-            client_builder = client_builder.interface(iface).no_proxy();
-        }
+        let client_builder = Client::builder();
+        #[cfg(unix)]
+        let client_builder = if let Some(iface) = crate::utils::get_bind_interface() {
+            client_builder.interface(iface).no_proxy()
+        } else {
+            client_builder
+        };
         let client = client_builder.build()?;
         let config_dir = self.config_manager.get_config_dir();
 
@@ -224,20 +227,8 @@ impl GeoIpManager {
 
     pub fn lookup(&self, ip: IpAddr) -> Option<GeoRecord> {
         let record = match ip {
-            IpAddr::V4(_) => {
-                if let Some(ref db) = self.db_v4 {
-                    db.ip_lookup(ip).ok()?
-                } else {
-                    return None;
-                }
-            }
-            IpAddr::V6(_) => {
-                if let Some(ref db) = self.db_v6 {
-                    db.ip_lookup(ip).ok()?
-                } else {
-                    return None;
-                }
-            }
+            IpAddr::V4(_) => self.db_v4.as_ref()?.ip_lookup(ip).ok()?,
+            IpAddr::V6(_) => self.db_v6.as_ref()?.ip_lookup(ip).ok()?,
         };
 
         let r = if let Record::LocationDb(rec) = record {
