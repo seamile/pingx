@@ -14,18 +14,15 @@ debug
 **/mutants.out*/
 
 # AI Tools
+.codegraph/
 .gemini/
 .geminiignore
 .kilo/
 .kilocode/
 .serena/
 .specify/
-specs/
-openspec/
-AGENTS.md
 GEMINI.md
 
 # Custom
 .DS_Store
 *.code-workspace
-misc/
