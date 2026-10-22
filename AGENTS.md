@@ -23,3 +23,7 @@ PingX is a Rust network diagnostic CLI for concurrent ICMP, TCP, and HTTP probin
 ## Checks
 
 Tests are mostly inline unit tests, with a small number of Tokio tests; prefer adding focused tests beside the code they cover. For Rust changes, run relevant tests, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --release` when practical. CI runs Clippy and release tests on Linux x86_64, macOS x86_64/ARM64, and Windows x86_64; report platform checks that cannot be run locally.
+
+## Commits
+
+- Use Conventional Commits: `<type>(<scope>): <subject>`. Most commits should have a one-line subject; only especially large commits spanning many files need a body describing the details.

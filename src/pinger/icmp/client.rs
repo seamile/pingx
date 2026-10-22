@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 
@@ -77,8 +77,8 @@ impl AsyncSocket {
             }
         }
 
-        let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(socket.into_raw_fd()) };
-        let async_fd = AsyncFd::new(std_sock)?;
+        let std_sock: std::net::UdpSocket = socket.into();
+        let async_fd = unsafe { AsyncFd::register(std_sock) }?;
 
         Ok(Self {
             inner: Arc::new(async_fd),

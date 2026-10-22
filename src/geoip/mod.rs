@@ -399,7 +399,7 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<String> {
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
+        let name = file.name()?.into_owned();
 
         // Match *.bin or *.BIN
         if name.to_uppercase().ends_with(".BIN") {
