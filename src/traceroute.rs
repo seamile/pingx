@@ -28,6 +28,7 @@ mod unix {
     use crate::geoip::GeoIpManager;
     use crate::pinger::icmp_packet::IcmpPacket;
     use crate::utils::{IpVersion, resolve_host};
+    use async_trait::async_trait;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::collections::{BTreeMap, HashMap};
     use std::io;
@@ -89,6 +90,18 @@ mod unix {
         error: Option<u8>,
     }
 
+    struct ProbeRun {
+        probes: HashMap<u16, Probe>,
+        stop_hop: Option<u8>,
+        terminal_error: Option<u8>,
+        max_sent: u8,
+    }
+
+    #[async_trait]
+    trait ProbeSender {
+        async fn send_probe(&self, data: Vec<u8>, target: IpAddr, ttl: u8) -> io::Result<()>;
+    }
+
     pub(super) async fn run_trace(cli: Cli) -> Result<()> {
         let target_name = cli.targets[0].clone();
         let version = if cli.ipv4 {
@@ -121,6 +134,39 @@ mod unix {
         let receiver = spawn_receiver(socket.clone(), target, reply_tx);
         let ident = trace_ident();
         let payload_size = size - if target.is_ipv4() { 28 } else { 48 };
+        let result = run_probes(
+            socket.as_ref(),
+            target,
+            ident,
+            payload_size,
+            max_hops,
+            timeout,
+            &mut reply_rx,
+        )
+        .await;
+        receiver.abort();
+        let result = result?;
+        render(&collect_rows(
+            result.probes,
+            result.stop_hop.unwrap_or(result.max_sent),
+        ))
+        .await;
+        match (result.stop_hop, result.terminal_error) {
+            (_, Some(code)) => anyhow::bail!("target is unreachable (ICMP error {})", code),
+            (Some(_), None) => Ok(()),
+            (None, None) => anyhow::bail!("target was not reached within {} hops", max_hops),
+        }
+    }
+
+    async fn run_probes(
+        sender: &dyn ProbeSender,
+        target: IpAddr,
+        ident: u16,
+        payload_size: usize,
+        max_hops: u8,
+        timeout: Duration,
+        reply_rx: &mut mpsc::Receiver<Reply>,
+    ) -> Result<ProbeRun> {
         let mut probes = HashMap::<u16, Probe>::new();
         let mut sequence = 1u16;
         let mut next_ttl = 1u16;
@@ -154,10 +200,7 @@ mod unix {
                             cancelled: false,
                         },
                     );
-                    if let Err(e) = socket.send_to(&packet.encode(), target, ttl).await {
-                        receiver.abort();
-                        return Err(e.into());
-                    }
+                    sender.send_probe(packet.encode(), target, ttl).await?;
                     let sent_at = Instant::now();
                     let deadline = sent_at
                         .checked_add(timeout)
@@ -213,15 +256,13 @@ mod unix {
             }
         }
 
-        receiver.abort();
         let max_sent = probes.values().map(|p| p.ttl).max().unwrap_or(0);
-        let last_hop = stop_hop.unwrap_or(max_sent);
-        render(&collect_rows(probes, last_hop)).await;
-        match (stop_hop, terminal_error) {
-            (_, Some(code)) => anyhow::bail!("target is unreachable (ICMP error {})", code),
-            (Some(_), None) => Ok(()),
-            (None, None) => anyhow::bail!("target was not reached within {} hops", max_hops),
-        }
+        Ok(ProbeRun {
+            probes,
+            stop_hop,
+            terminal_error,
+            max_sent,
+        })
     }
 
     fn pending_for_hop(probes: &HashMap<u16, Probe>, target_hop: Option<u8>) -> Option<()> {
@@ -413,6 +454,13 @@ mod unix {
                     Err(_) => continue,
                 }
             }
+        }
+    }
+
+    #[async_trait]
+    impl ProbeSender for TraceSocket {
+        async fn send_probe(&self, data: Vec<u8>, target: IpAddr, ttl: u8) -> io::Result<()> {
+            self.send_to(&data, target, ttl).await
         }
     }
 
@@ -829,6 +877,53 @@ mod unix {
     mod tests {
         use super::*;
         use std::net::{Ipv4Addr, Ipv6Addr};
+        use std::sync::Mutex;
+        use tokio::sync::mpsc;
+
+        #[derive(Default)]
+        struct TestSender {
+            ttl_log: Mutex<Vec<u8>>,
+        }
+
+        impl TestSender {
+            fn sent_ttls(&self) -> Vec<u8> {
+                self.ttl_log.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl ProbeSender for TestSender {
+            async fn send_probe(&self, _data: Vec<u8>, _target: IpAddr, ttl: u8) -> io::Result<()> {
+                self.ttl_log.lock().unwrap().push(ttl);
+                Ok(())
+            }
+        }
+
+        async fn run_fake_trace(
+            sender: &TestSender,
+            max_hops: u8,
+            timeout: Duration,
+            replies: Vec<Reply>,
+            reply_delay: Duration,
+        ) -> Result<ProbeRun> {
+            let (tx, mut rx) = mpsc::channel(128);
+            tokio::spawn(async move {
+                tokio::time::sleep(reply_delay).await;
+                for reply in replies {
+                    let _ = tx.send(reply).await;
+                }
+            });
+            run_probes(
+                sender,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                trace_ident(),
+                12,
+                max_hops,
+                timeout,
+                &mut rx,
+            )
+            .await
+        }
 
         fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
             let mut data = vec![0u8; 20];
@@ -1097,6 +1192,77 @@ mod unix {
             assert!(probes[&1].cancelled);
             assert!(!probes[&2].cancelled);
             assert!(!probes[&3].cancelled);
+        }
+
+        #[tokio::test]
+        async fn full_trace_pipelines_and_stops_after_target() {
+            let sender = TestSender::default();
+            let result = run_fake_trace(
+                &sender,
+                64,
+                Duration::from_millis(30),
+                vec![Reply {
+                    sequence: 7,
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    kind: ReplyKind::Reached,
+                    received_at: Instant::now() + Duration::from_millis(1),
+                }],
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                sender.sent_ttls(),
+                [
+                    1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8
+                ]
+            );
+            assert_eq!(result.stop_hop, Some(3));
+            assert_eq!(result.terminal_error, None);
+            assert_eq!(result.max_sent, 8);
+        }
+
+        #[tokio::test]
+        async fn full_trace_reports_terminal_unreachable() {
+            let sender = TestSender::default();
+            let result = run_fake_trace(
+                &sender,
+                64,
+                Duration::from_millis(30),
+                vec![Reply {
+                    sequence: 4,
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    kind: ReplyKind::Unreachable(3),
+                    received_at: Instant::now(),
+                }],
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.stop_hop, Some(2));
+            assert_eq!(result.terminal_error, Some(3));
+            assert_eq!(sender.sent_ttls().len(), SEND_WINDOW);
+        }
+
+        #[tokio::test]
+        async fn full_trace_respects_max_hops_after_timeouts() {
+            let sender = TestSender::default();
+            let result = run_fake_trace(
+                &sender,
+                2,
+                Duration::from_millis(10),
+                vec![],
+                Duration::from_millis(50),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(sender.sent_ttls(), [1, 1, 1, 2, 2, 2]);
+            assert_eq!(result.stop_hop, None);
+            assert_eq!(result.max_sent, 2);
+            assert!(result.probes.values().all(|probe| probe.reply.is_none()));
         }
 
         #[test]
