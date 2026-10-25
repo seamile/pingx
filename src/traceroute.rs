@@ -115,12 +115,7 @@ mod unix {
         let timeout = cli.timeout;
         let socket = Arc::new(TraceSocket::new(target.is_ipv6())?);
 
-        println!(
-            "Target: {}   Max Hops: {:>3}    Size: {} b",
-            display_target(&target_name, target),
-            max_hops,
-            size
-        );
+        println!("{}", trace_header(&target_name, target, max_hops, size));
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
         let receiver = spawn_receiver(socket.clone(), target, reply_tx);
@@ -130,7 +125,7 @@ mod unix {
         let mut sequence = 1u16;
         let mut next_ttl = 1u16;
         let mut stop_hop = None::<u8>;
-        let mut reached_target = false;
+        let mut terminal_error = None::<u8>;
 
         loop {
             let now = Instant::now();
@@ -204,11 +199,11 @@ mod unix {
                         let rtt = reply_rtt(probe.started, reply);
                         probe.reply = Some((reply.ip, rtt, reply.kind));
                         if reply.kind == ReplyKind::Reached {
-                            reached_target = true;
                             stop_hop =
                                 Some(stop_hop.map_or(reply_ttl, |hop: u8| hop.min(reply_ttl)));
                             cancel_higher_ttls(&mut probes, reply_ttl);
-                        } else if matches!(reply.kind, ReplyKind::Unreachable(_)) {
+                        } else if let ReplyKind::Unreachable(code) = reply.kind {
+                            terminal_error = Some(code);
                             stop_hop = Some(stop_hop.map_or(reply_ttl, |hop: u8| hop.min(reply_ttl)));
                             cancel_higher_ttls(&mut probes, reply_ttl);
                         }
@@ -222,10 +217,11 @@ mod unix {
         let max_sent = probes.values().map(|p| p.ttl).max().unwrap_or(0);
         let last_hop = stop_hop.unwrap_or(max_sent);
         render(&collect_rows(probes, last_hop)).await;
-        if !reached_target {
-            anyhow::bail!("target was not reached within {} hops", max_hops);
+        match (stop_hop, terminal_error) {
+            (_, Some(code)) => anyhow::bail!("target is unreachable (ICMP error {})", code),
+            (Some(_), None) => Ok(()),
+            (None, None) => anyhow::bail!("target was not reached within {} hops", max_hops),
         }
-        Ok(())
     }
 
     fn pending_for_hop(probes: &HashMap<u16, Probe>, target_hop: Option<u8>) -> Option<()> {
@@ -318,6 +314,15 @@ mod unix {
         } else {
             format!("{} ({})", name, ip)
         }
+    }
+
+    fn trace_header(name: &str, ip: IpAddr, max_hops: u8, size: usize) -> String {
+        format!(
+            "Target: {}   Max Hops: {:>3}    Size: {} b",
+            display_target(name, ip),
+            max_hops,
+            size
+        )
     }
 
     struct TraceSocket {
@@ -560,11 +565,13 @@ mod unix {
     }
 
     fn strip_ipv4(data: &[u8]) -> Option<(&[u8], usize)> {
-        if data.len() < 20 || data[0] >> 4 != 4 {
-            return None;
+        if data.len() >= 20 && data[0] >> 4 == 4 {
+            let ihl = (data[0] & 0x0f) as usize * 4;
+            return (ihl >= 20 && data.len() >= ihl).then_some((&data[ihl..], ihl));
         }
-        let ihl = (data[0] & 0x0f) as usize * 4;
-        (ihl >= 20 && data.len() >= ihl).then_some((&data[ihl..], ihl))
+        // DGRAM ICMP sockets may return the ICMP message without an IPv4 header.
+        (data.len() >= 8 && matches!(data[0], 0 | ICMP_TIME_EXCEEDED_V4 | ICMP_DEST_UNREACH_V4))
+            .then_some((data, 0))
     }
 
     fn embedded_sequence_v4(icmp: &[u8], target: IpAddr) -> Option<u16> {
@@ -863,6 +870,36 @@ mod unix {
         }
 
         #[test]
+        fn parses_ipv4_dgram_replies_without_ip_header() {
+            let target = Ipv4Addr::new(198, 51, 100, 1);
+            let inner = IcmpPacket::new_request(false, trace_ident(), 44, vec![0; 12]).encode();
+            let mut time_exceeded = vec![ICMP_TIME_EXCEEDED_V4, 0, 0, 0, 0, 0, 0, 0];
+            time_exceeded.extend(ipv4_packet(Ipv4Addr::new(192, 0, 2, 1), target, &inner));
+            let reply = parse_reply_v4(
+                &time_exceeded,
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                IpAddr::V4(target),
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.sequence, 44);
+            assert_eq!(reply.kind, ReplyKind::Hop);
+
+            let mut echo = vec![0, 0, 0, 0, 0, 0, 0, 0];
+            echo[4..6].copy_from_slice(&trace_ident().to_be_bytes());
+            echo[6..8].copy_from_slice(&45u16.to_be_bytes());
+            let reply = parse_reply_v4(
+                &echo,
+                IpAddr::V4(target),
+                IpAddr::V4(target),
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.sequence, 45);
+            assert_eq!(reply.kind, ReplyKind::Reached);
+        }
+
+        #[test]
         fn parses_ipv6_with_fragment_header() {
             let received_at = Instant::now();
             let inner = IcmpPacket::new_request(true, trace_ident(), 43, vec![0; 12]).encode();
@@ -1076,6 +1113,14 @@ mod unix {
             assert_eq!(
                 UnicodeWidthStr::width(lines[0]),
                 UnicodeWidthStr::width(lines[2])
+            );
+        }
+
+        #[test]
+        fn header_uses_the_documented_layout() {
+            assert_eq!(
+                trace_header("demo.example", IpAddr::V4(Ipv4Addr::LOCALHOST), 64, 40),
+                "Target: demo.example (127.0.0.1)   Max Hops:  64    Size: 40 b"
             );
         }
 

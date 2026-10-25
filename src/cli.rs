@@ -49,6 +49,7 @@ pub struct Cli {
         short = 's',
         default_value = "56",
         overrides_with = "size",
+        conflicts_with = "traceroute",
         help_heading = "Ping options"
     )]
     pub size: usize,
@@ -199,8 +200,7 @@ mod tests {
     fn traceroute_keeps_positional_targets_for_legacy_cli() {
         let cli = parse(&["-R", "example.com"]).unwrap();
         assert_eq!(cli.targets, ["example.com"]);
-        let cli = parse(&["-R", "-s", "56", "example.com"]).unwrap();
-        assert_eq!(cli.size, 56);
+        assert!(parse(&["-R", "-s", "56", "example.com"]).is_err());
     }
 
     #[test]
