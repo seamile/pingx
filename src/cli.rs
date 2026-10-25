@@ -58,7 +58,7 @@ pub struct Cli {
     #[arg(short = 'q', conflicts_with = "traceroute")]
     pub quiet: bool,
 
-    /// 全局网络接口：DNS、探测、HTTP 和 GeoIP 通信均使用该接口。
+    /// Use this network interface for DNS, probes, HTTP, and GeoIP.
     #[arg(short = 'I', long = "interface", value_name = "IFACE")]
     pub interface: Option<String>,
 

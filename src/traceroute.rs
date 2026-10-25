@@ -79,7 +79,6 @@ mod unix {
     struct Row {
         ttl: u8,
         nodes: Vec<Node>,
-        missing: usize,
     }
 
     #[derive(Debug)]
@@ -129,7 +128,7 @@ mod unix {
 
         println!(
             "{}",
-            trace_header(&target_name, target, max_hops, size).bold()
+            styled_trace_header(&target_name, target, max_hops, size)
         );
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
@@ -359,11 +358,14 @@ mod unix {
         }
     }
 
-    fn trace_header(name: &str, ip: IpAddr, max_hops: u8, size: usize) -> String {
+    fn styled_trace_header(name: &str, ip: IpAddr, max_hops: u8, size: usize) -> String {
         format!(
-            "Target: {}   Max Hops: {:>3}    Size: {} b",
+            "{} {}   {} {:>3}    {} {} b",
+            "Target:".bold(),
             display_target(name, ip),
+            "Max Hops:".bold(),
             max_hops,
+            "Size:".bold(),
             size
         )
     }
@@ -526,11 +528,7 @@ mod unix {
                     Node { ip, rtts, error }
                 })
                 .collect();
-            rows.push(Row {
-                ttl,
-                nodes,
-                missing: hop.iter().filter(|p| p.reply.is_none()).count(),
-            });
+            rows.push(Row { ttl, nodes });
         }
         rows
     }
@@ -710,16 +708,11 @@ mod unix {
             for (index, node) in row.nodes.iter().enumerate() {
                 let location = location_for(geo, node.ip);
                 let avg = node.rtts.iter().sum::<Duration>() / node.rtts.len() as u32;
-                let suffix = if index + 1 == row.nodes.len() && row.missing > 0 {
-                    "*"
-                } else {
-                    ""
-                };
                 let error = node
                     .error
                     .map(|code| format!(" (error {})", code))
                     .unwrap_or_default();
-                let rtt = format!("{:.3} ms{}{}", avg.as_secs_f64() * 1000.0, suffix, error);
+                let rtt = format!("{:.3} ms{}", avg.as_secs_f64() * 1000.0, error);
                 cells.push((
                     if index == 0 {
                         row.ttl.to_string()
@@ -774,7 +767,7 @@ mod unix {
                 .join(" | "),
             format!(
                 "{}+{}+{}+{}",
-                "-".repeat(widths[0] + 2),
+                "-".repeat(widths[0] + 1),
                 "-".repeat(widths[1] + 2),
                 "-".repeat(widths[2] + 2),
                 "-".repeat(widths[3] + 2)
@@ -1075,7 +1068,7 @@ mod unix {
             assert_eq!(rows[0].nodes.len(), 2);
             assert_eq!(rows[0].nodes[0].rtts.len(), 2);
             assert_eq!(rows[0].nodes[1].rtts.len(), 1);
-            assert_eq!(rows.iter().map(|row| row.missing).sum::<usize>(), 0);
+            assert!(rows.iter().all(|row| !row.nodes.is_empty()));
         }
 
         #[test]
@@ -1244,9 +1237,34 @@ mod unix {
         #[test]
         fn header_uses_the_documented_layout() {
             assert_eq!(
-                trace_header("demo.example", IpAddr::V4(Ipv4Addr::LOCALHOST), 64, 40),
+                styled_trace_header("demo.example", IpAddr::V4(Ipv4Addr::LOCALHOST), 64, 40),
                 "Target: demo.example (127.0.0.1)   Max Hops:  64    Size: 40 b"
             );
+        }
+
+        #[test]
+        fn trace_header_bolds_only_keys() {
+            let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let styled = format!(
+                "{} {}   {} {:>3}    {} {} b",
+                "Target:".bold(),
+                display_target("demo.example", target),
+                "Max Hops:".bold(),
+                64,
+                "Size:".bold(),
+                40
+            );
+            let plain = format!(
+                "Target: {}   Max Hops:  64    Size: 40 b",
+                display_target("demo.example", target)
+            );
+            assert_eq!(styled.replace("\x1b[1m", "").replace("\x1b[0m", ""), plain);
+            assert!(!styled.contains(&format!(
+                "\x1b[1m{}",
+                display_target("demo.example", target)
+            )));
+            assert!(!styled.contains(&format!("\x1b[1m{}", 64)));
+            assert!(!styled.contains(&format!("\x1b[1m{}", 40)));
         }
 
         #[test]
@@ -1304,7 +1322,6 @@ mod unix {
                             error: None,
                         },
                     ],
-                    missing: 0,
                 },
                 Row {
                     ttl: 2,
@@ -1313,7 +1330,6 @@ mod unix {
                         rtts: vec![Duration::from_millis(5), Duration::from_millis(6)],
                         error: None,
                     }],
-                    missing: 1,
                 },
                 Row {
                     ttl: 3,
@@ -1322,7 +1338,6 @@ mod unix {
                         rtts: vec![Duration::from_millis(4)],
                         error: Some(3),
                     }],
-                    missing: 2,
                 },
             ];
 
@@ -1334,9 +1349,10 @@ mod unix {
             assert_eq!(lines[1].chars().filter(|&ch| ch == '+').count(), 3);
             assert!(lines[2].contains("1 | 192.0.2.1"));
             assert!(lines[3].starts_with("    | 192.0.2.2"));
-            assert!(lines[4].contains("2 | 192.0.2.2") && lines[4].contains("5.500 ms*"));
+            assert!(lines[4].contains("2 | 192.0.2.2") && lines[4].contains("5.500 ms"));
+            assert!(!lines[4].contains("*"));
             assert!(lines[5].contains("| -") && lines[5].contains("(error 3)"));
-            assert!(lines[5].contains("ms* (error 3)"));
+            assert!(lines[5].contains("4.000 ms (error 3)"));
             assert!(
                 lines[2..].iter().all(|line| {
                     UnicodeWidthStr::width(*line) == UnicodeWidthStr::width(lines[2])
