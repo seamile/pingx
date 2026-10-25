@@ -29,6 +29,7 @@ mod unix {
     use crate::pinger::icmp_packet::IcmpPacket;
     use crate::utils::{IpVersion, resolve_host};
     use async_trait::async_trait;
+    use colored::Colorize;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::collections::{BTreeMap, HashMap};
     use std::io;
@@ -38,12 +39,10 @@ mod unix {
     use std::time::{Duration, Instant};
     use tokio::io::unix::AsyncFd;
     use tokio::sync::mpsc;
-    use tokio::task::JoinSet;
     use unicode_width::UnicodeWidthStr;
 
     const PROBES_PER_HOP: usize = 3;
     const SEND_WINDOW: usize = 8 * PROBES_PER_HOP;
-    const HOST_MAX_WIDTH: usize = 48;
     const LOCATION_MAX_WIDTH: usize = 48;
     const IP_MAX_WIDTH: usize = 48;
     const ICMP_TIME_EXCEEDED_V4: u8 = 11;
@@ -128,7 +127,10 @@ mod unix {
         let timeout = cli.timeout;
         let socket = Arc::new(TraceSocket::new(target.is_ipv6())?);
 
-        println!("{}", trace_header(&target_name, target, max_hops, size));
+        println!(
+            "{}",
+            trace_header(&target_name, target, max_hops, size).bold()
+        );
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
         let receiver = spawn_receiver(socket.clone(), target, reply_tx);
@@ -690,30 +692,10 @@ mod unix {
                 "pingx: GeoIP database is unavailable; locations are shown as '-'. Run `pingx --fetch-geo` to configure it."
             );
         }
-        let resolver = crate::utils::dns_resolver(Duration::from_millis(300), 1).ok();
-        let mut ptr_results = JoinSet::new();
-        for row in rows {
-            for node in &row.nodes {
-                if let Some(resolver) = resolver.clone() {
-                    let ip = node.ip;
-                    ptr_results.spawn(async move { (ip, reverse_lookup(&resolver, ip).await) });
-                }
-            }
-        }
-        let mut hosts = HashMap::new();
-        while let Some(result) = ptr_results.join_next().await {
-            if let Ok((ip, host)) = result {
-                hosts.insert(ip, host.unwrap_or_else(|| "-".to_string()));
-            }
-        }
-        println!("\n{}", render_rows(rows, &hosts, geo.as_ref()));
+        println!("{}", render_rows(rows, geo.as_ref()));
     }
 
-    fn render_rows(
-        rows: &[Row],
-        hosts: &HashMap<IpAddr, String>,
-        geo: Option<&GeoIpManager>,
-    ) -> String {
+    fn render_rows(rows: &[Row], geo: Option<&GeoIpManager>) -> String {
         let mut cells = Vec::with_capacity(rows.len());
         for row in rows {
             if row.nodes.is_empty() {
@@ -721,19 +703,12 @@ mod unix {
                     row.ttl.to_string(),
                     "-".to_string(),
                     "-".to_string(),
-                    "-".to_string(),
                     "*".to_string(),
                 ));
                 continue;
             }
             for (index, node) in row.nodes.iter().enumerate() {
-                let host = hosts
-                    .get(&node.ip)
-                    .cloned()
-                    .unwrap_or_else(|| "-".to_string());
                 let location = location_for(geo, node.ip);
-                let min = node.rtts[0];
-                let max = node.rtts[node.rtts.len() - 1];
                 let avg = node.rtts.iter().sum::<Duration>() / node.rtts.len() as u32;
                 let suffix = if index + 1 == row.nodes.len() && row.missing > 0 {
                     "*"
@@ -744,21 +719,13 @@ mod unix {
                     .error
                     .map(|code| format!(" (error {})", code))
                     .unwrap_or_default();
-                let rtt = format!(
-                    "{:.3}/{:.3}/{:.3} ms{}{}",
-                    min.as_secs_f64() * 1000.0,
-                    avg.as_secs_f64() * 1000.0,
-                    max.as_secs_f64() * 1000.0,
-                    suffix,
-                    error
-                );
+                let rtt = format!("{:.3} ms{}{}", avg.as_secs_f64() * 1000.0, suffix, error);
                 cells.push((
                     if index == 0 {
                         row.ttl.to_string()
                     } else {
                         String::new()
                     },
-                    host,
                     node.ip.to_string(),
                     location,
                     rtt,
@@ -768,13 +735,12 @@ mod unix {
         render_table(&cells)
     }
 
-    fn render_table(cells: &[(String, String, String, String, String)]) -> String {
+    fn render_table(cells: &[(String, String, String, String)]) -> String {
         let cells: Vec<_> = cells
             .iter()
-            .map(|(hop, host, ip, location, rtt)| {
+            .map(|(hop, ip, location, rtt)| {
                 (
                     hop.clone(),
-                    truncate(host, HOST_MAX_WIDTH),
                     truncate(ip, IP_MAX_WIDTH),
                     truncate(location, LOCATION_MAX_WIDTH),
                     rtt.clone(),
@@ -788,46 +754,39 @@ mod unix {
                     0 => UnicodeWidthStr::width(cell.0.as_str()),
                     1 => UnicodeWidthStr::width(cell.1.as_str()),
                     2 => UnicodeWidthStr::width(cell.2.as_str()),
-                    3 => UnicodeWidthStr::width(cell.3.as_str()),
-                    _ => UnicodeWidthStr::width(cell.4.as_str()),
+                    _ => UnicodeWidthStr::width(cell.3.as_str()),
                 })
                 .max()
                 .unwrap_or(fallback)
                 .max(fallback)
         };
-        let widths = [
-            width(0, 3),
-            width(1, 4),
-            width(2, 2),
-            width(3, 8),
-            width(4, 3),
+        let widths = [width(0, 3), width(1, 2), width(2, 8), width(3, 3)];
+        let header = [
+            pad_left("Hop", widths[0]),
+            pad_right("IP", widths[1]),
+            pad_right("Location", widths[2]),
+            pad_left("RTT", widths[3]),
         ];
         let mut lines = vec![
+            header
+                .each_ref()
+                .map(|cell| cell.bold().to_string())
+                .join(" | "),
             format!(
-                "{} | {} | {} | {} | {}",
-                pad_left("Hop", widths[0]),
-                pad_right("Host", widths[1]),
-                pad_right("IP", widths[2]),
-                pad_right("Location", widths[3]),
-                pad_left("RTT", widths[4])
-            ),
-            format!(
-                "{}+{}+{}+{}+{}",
+                "{}+{}+{}+{}",
                 "-".repeat(widths[0] + 2),
                 "-".repeat(widths[1] + 2),
                 "-".repeat(widths[2] + 2),
-                "-".repeat(widths[3] + 2),
-                "-".repeat(widths[4] + 2)
+                "-".repeat(widths[3] + 2)
             ),
         ];
-        for (hop, host, ip, location, rtt) in &cells {
+        for (hop, ip, location, rtt) in &cells {
             lines.push(format!(
-                "{} | {} | {} | {} | {}",
+                "{} | {} | {} | {}",
                 pad_left(hop, widths[0]),
-                pad_right(host, widths[1]),
-                pad_right(ip, widths[2]),
-                pad_right(location, widths[3]),
-                pad_left(rtt, widths[4])
+                pad_right(ip, widths[1]),
+                pad_right(location, widths[2]),
+                pad_left(rtt, widths[3])
             ));
         }
         lines.join("\n")
@@ -868,23 +827,6 @@ mod unix {
             " ".repeat(width.saturating_sub(UnicodeWidthStr::width(value))),
             value
         )
-    }
-
-    async fn reverse_lookup(
-        resolver: &hickory_resolver::TokioResolver,
-        ip: IpAddr,
-    ) -> Option<String> {
-        let lookup = tokio::time::timeout(Duration::from_millis(500), resolver.reverse_lookup(ip))
-            .await
-            .ok()?
-            .ok()?;
-        lookup.answers().iter().find_map(|record| {
-            if let hickory_resolver::proto::rr::RData::PTR(name) = &record.data {
-                Some(name.to_utf8().trim_end_matches('.').to_string())
-            } else {
-                None
-            }
-        })
     }
 
     fn trace_ident() -> u16 {
@@ -1287,7 +1229,6 @@ mod unix {
         fn table_pads_cjk_by_terminal_width() {
             let cells = [(
                 "1".to_string(),
-                "host".to_string(),
                 "1.1.1.1".to_string(),
                 "东京".to_string(),
                 "1.000 ms".to_string(),
@@ -1309,12 +1250,30 @@ mod unix {
         }
 
         #[test]
+        fn styled_header_does_not_break_table_alignment() {
+            let cells = [(
+                "1".to_string(),
+                "1.1.1.1".to_string(),
+                "Tokyo".to_string(),
+                "1.000 ms".to_string(),
+            )];
+            let table = render_table(&cells);
+            let lines: Vec<_> = table.lines().collect();
+            let header = colored::control::SHOULD_COLORIZE.should_colorize();
+            let plain_header = if header {
+                lines[0].replace("\x1b[1m", "").replace("\x1b[0m", "")
+            } else {
+                lines[0].to_string()
+            };
+            assert_eq!(plain_header, lines[0]);
+            assert!(header || lines[0] == plain_header);
+        }
+
+        #[test]
         fn long_cells_are_truncated_without_breaking_alignment() {
-            let host = "h".repeat(HOST_MAX_WIDTH + 20);
             let location = "城".repeat(LOCATION_MAX_WIDTH);
             let cells = (
                 "1".to_string(),
-                host,
                 "1.1.1.1".to_string(),
                 location,
                 "1.000 ms".to_string(),
@@ -1330,16 +1289,6 @@ mod unix {
 
         #[test]
         fn rows_keep_timeouts_and_multiple_nodes_readable() {
-            let hosts = HashMap::from([
-                (
-                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                    "edge.example".to_string(),
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-                    "core.example".to_string(),
-                ),
-            ]);
             let rows = vec![
                 Row {
                     ttl: 1,
@@ -1377,14 +1326,16 @@ mod unix {
                 },
             ];
 
-            let table = render_rows(&rows, &hosts, None);
+            let table = render_rows(&rows, None);
             let lines: Vec<_> = table.lines().collect();
             assert_eq!(lines.len(), 6);
-            assert!(lines[2].contains("1 | edge.example"));
-            assert!(lines[3].trim_start().starts_with("| core.example"));
-            assert!(lines[4].contains("2 | core.example"));
-            assert!(lines[4].contains("ms*"));
-            assert!(lines[5].contains("3 | -") && lines[5].contains("(error 3)"));
+            assert!(lines[0].contains("Hop") && lines[0].contains("Location"));
+            assert!(!lines[0].contains("Host"));
+            assert_eq!(lines[1].chars().filter(|&ch| ch == '+').count(), 3);
+            assert!(lines[2].contains("1 | 192.0.2.1"));
+            assert!(lines[3].starts_with("    | 192.0.2.2"));
+            assert!(lines[4].contains("2 | 192.0.2.2") && lines[4].contains("5.500 ms*"));
+            assert!(lines[5].contains("| -") && lines[5].contains("(error 3)"));
             assert!(lines[5].contains("ms* (error 3)"));
             assert!(
                 lines[2..].iter().all(|line| {

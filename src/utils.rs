@@ -112,38 +112,6 @@ pub(crate) fn bind_dns_servers(
     Ok(())
 }
 
-pub(crate) fn dns_resolver(
-    timeout: std::time::Duration,
-    attempts: usize,
-) -> Result<hickory_resolver::TokioResolver> {
-    use hickory_resolver::TokioResolver;
-    use hickory_resolver::config::ResolverConfig;
-    use hickory_resolver::net::runtime::TokioRuntimeProvider;
-    use hickory_resolver::system_conf;
-
-    let mut builder = TokioResolver::builder_tokio()?;
-    builder.options_mut().timeout = timeout;
-    builder.options_mut().attempts = attempts;
-    if let Some(iface) = get_bind_interface() {
-        let source_ips = get_interface_ips(iface);
-        let (mut config, mut options) = system_conf::read_system_conf()?;
-        bind_dns_servers(&mut config, &source_ips)
-            .with_context(|| format!("cannot use system DNS via interface '{}'", iface))?;
-        options.timeout = timeout;
-        options.attempts = attempts;
-        builder = TokioResolver::builder_with_config(
-            ResolverConfig::from_parts(
-                config.domain().cloned(),
-                config.search().to_vec(),
-                config.name_servers().to_vec(),
-            ),
-            TokioRuntimeProvider::default(),
-        )
-        .with_options(options);
-    }
-    Ok(builder.build()?)
-}
-
 static BIND_INTERFACE: OnceLock<Option<String>> = OnceLock::new();
 
 pub fn set_bind_interface(iface: Option<String>) {
