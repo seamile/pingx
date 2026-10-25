@@ -119,7 +119,7 @@ pingx -R -I en0 example.com
 
 Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. RTT is shown as `min/avg/max`; `*` marks an incomplete set of replies. A hop answered by multiple nodes gets one row per node, each with its own hostname and location. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size.
 
-Traceroute requires RAW ICMP privileges on Unix. There is no traceroute support on Windows. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
+On macOS, traceroute uses an unprivileged ICMP DGRAM socket. On Linux, it requires RAW ICMP privileges (`sudo` or `CAP_NET_RAW`). There is no traceroute support on Windows. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
 
 ### GeoIP Lookup
 
@@ -284,7 +284,7 @@ pingx -R -I en0 example.com
 
 每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。RTT 显示为 `min/avg/max`；探测未全部返回时追加 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示主机名和位置。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 IP 报文总长度。
 
-Unix 下需要 RAW ICMP 权限；Windows 不支持路由追踪。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
+macOS 下使用无需特权的 ICMP DGRAM socket；Linux 下需要 RAW ICMP 权限（`sudo` 或 `CAP_NET_RAW`）。Windows 不支持路由追踪。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
 
 ### GeoIP 位置查询
 

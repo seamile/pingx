@@ -342,7 +342,10 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     // If both fail, and RAW failed with PermissionDenied, we prompt.
 
     let can_create_dgram = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
-    if can_create_dgram && !cli.traceroute {
+    if !cli.traceroute {
+        return Ok(());
+    }
+    if can_create_dgram {
         return Ok(());
     }
 

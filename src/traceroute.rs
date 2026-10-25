@@ -378,7 +378,7 @@ mod unix {
             } else {
                 (Domain::IPV4, Protocol::ICMPV4)
             };
-            let socket = Socket::new(domain, Type::RAW, Some(protocol)).map_err(|e| {
+            let socket = Socket::new(domain, socket_type(), Some(protocol)).map_err(|e| {
                 if e.kind() == io::ErrorKind::PermissionDenied {
                     io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -455,6 +455,16 @@ mod unix {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn socket_type() -> Type {
+        Type::DGRAM
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn socket_type() -> Type {
+        Type::RAW
     }
 
     #[async_trait]
