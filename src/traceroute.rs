@@ -696,6 +696,14 @@ mod unix {
                 hosts.insert(ip, host.unwrap_or_else(|| "-".to_string()));
             }
         }
+        println!("\n{}", render_rows(rows, &hosts, geo.as_ref()));
+    }
+
+    fn render_rows(
+        rows: &[Row],
+        hosts: &HashMap<IpAddr, String>,
+        geo: Option<&GeoIpManager>,
+    ) -> String {
         let mut cells = Vec::with_capacity(rows.len());
         for row in rows {
             if row.nodes.is_empty() {
@@ -713,7 +721,7 @@ mod unix {
                     .get(&node.ip)
                     .cloned()
                     .unwrap_or_else(|| "-".to_string());
-                let location = location_for(geo.as_ref(), node.ip);
+                let location = location_for(geo, node.ip);
                 let min = node.rtts[0];
                 let max = node.rtts[node.rtts.len() - 1];
                 let avg = node.rtts.iter().sum::<Duration>() / node.rtts.len() as u32;
@@ -747,7 +755,7 @@ mod unix {
                 ));
             }
         }
-        println!("\n{}", render_table(&cells));
+        render_table(&cells)
     }
 
     fn render_table(cells: &[(String, String, String, String, String)]) -> String {
@@ -1308,6 +1316,71 @@ mod unix {
                 UnicodeWidthStr::width(lines[2])
             );
             assert!(UnicodeWidthStr::width(lines[2]) < 160);
+        }
+
+        #[test]
+        fn rows_keep_timeouts_and_multiple_nodes_readable() {
+            let hosts = HashMap::from([
+                (
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                    "edge.example".to_string(),
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                    "core.example".to_string(),
+                ),
+            ]);
+            let rows = vec![
+                Row {
+                    ttl: 1,
+                    nodes: vec![
+                        Node {
+                            ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                            rtts: vec![Duration::from_millis(2)],
+                            error: None,
+                        },
+                        Node {
+                            ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                            rtts: vec![Duration::from_millis(1), Duration::from_millis(3)],
+                            error: None,
+                        },
+                    ],
+                    missing: 0,
+                },
+                Row {
+                    ttl: 2,
+                    nodes: vec![Node {
+                        ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                        rtts: vec![Duration::from_millis(5), Duration::from_millis(6)],
+                        error: None,
+                    }],
+                    missing: 1,
+                },
+                Row {
+                    ttl: 3,
+                    nodes: vec![Node {
+                        ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        rtts: vec![Duration::from_millis(4)],
+                        error: Some(3),
+                    }],
+                    missing: 2,
+                },
+            ];
+
+            let table = render_rows(&rows, &hosts, None);
+            let lines: Vec<_> = table.lines().collect();
+            assert_eq!(lines.len(), 6);
+            assert!(lines[2].contains("1 | edge.example"));
+            assert!(lines[3].trim_start().starts_with("| core.example"));
+            assert!(lines[4].contains("2 | core.example"));
+            assert!(lines[4].contains("ms*"));
+            assert!(lines[5].contains("3 | -") && lines[5].contains("(error 3)"));
+            assert!(lines[5].contains("ms* (error 3)"));
+            assert!(
+                lines[2..].iter().all(|line| {
+                    UnicodeWidthStr::width(*line) == UnicodeWidthStr::width(lines[2])
+                })
+            );
         }
 
         #[test]
