@@ -89,7 +89,7 @@ async fn resolve_host_on_interface(host: &str, iface: &str) -> Result<Vec<IpAddr
     Ok(lookup.iter().collect())
 }
 
-fn bind_dns_servers(
+pub(crate) fn bind_dns_servers(
     config: &mut hickory_resolver::config::ResolverConfig,
     source_ips: &[IpAddr],
 ) -> Result<()> {
@@ -110,6 +110,38 @@ fn bind_dns_servers(
         "no DNS server has a matching usable interface address"
     );
     Ok(())
+}
+
+pub(crate) fn dns_resolver(
+    timeout: std::time::Duration,
+    attempts: usize,
+) -> Result<hickory_resolver::TokioResolver> {
+    use hickory_resolver::TokioResolver;
+    use hickory_resolver::config::ResolverConfig;
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    use hickory_resolver::system_conf;
+
+    let mut builder = TokioResolver::builder_tokio()?;
+    builder.options_mut().timeout = timeout;
+    builder.options_mut().attempts = attempts;
+    if let Some(iface) = get_bind_interface() {
+        let source_ips = get_interface_ips(iface);
+        let (mut config, mut options) = system_conf::read_system_conf()?;
+        bind_dns_servers(&mut config, &source_ips)
+            .with_context(|| format!("cannot use system DNS via interface '{}'", iface))?;
+        options.timeout = timeout;
+        options.attempts = attempts;
+        builder = TokioResolver::builder_with_config(
+            ResolverConfig::from_parts(
+                config.domain().cloned(),
+                config.search().to_vec(),
+                config.name_servers().to_vec(),
+            ),
+            TokioRuntimeProvider::default(),
+        )
+        .with_options(options);
+    }
+    Ok(builder.build()?)
 }
 
 static BIND_INTERFACE: OnceLock<Option<String>> = OnceLock::new();
@@ -310,7 +342,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     // If both fail, and RAW failed with PermissionDenied, we prompt.
 
     let can_create_dgram = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
-    if can_create_dgram {
+    if can_create_dgram && !cli.traceroute {
         return Ok(());
     }
 
@@ -667,6 +699,8 @@ mod tests {
             fetch_geo: false,
             json: None,
             interface: None,
+            traceroute: false,
+            max_hops: 64,
         };
 
         // 1. Basic ICMP (Domain)

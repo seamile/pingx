@@ -4,6 +4,7 @@ mod geoip;
 mod happy_eyeballs;
 mod pinger;
 mod session;
+mod traceroute;
 mod utils;
 
 use clap::{CommandFactory, Parser};
@@ -29,6 +30,37 @@ async fn main() {
         std::process::exit(1);
     }
     utils::set_bind_interface(args.interface.clone());
+
+    if args.traceroute {
+        if !(1..=2).contains(&args.targets.len()) {
+            eprintln!("pingx: traceroute mode requires a target and an optional packet size");
+            std::process::exit(2);
+        }
+        if let Some(size) = args.targets.get(1) {
+            let Ok(value) = size.parse::<usize>() else {
+                eprintln!("pingx: traceroute packet size must be an integer");
+                std::process::exit(2);
+            };
+            if !(28..=u16::MAX as usize).contains(&value) {
+                eprintln!("pingx: traceroute packet size must be between 28 and 65535 bytes");
+                std::process::exit(2);
+            }
+        }
+        if args.quiet {
+            eprintln!("pingx: traceroute output cannot be quiet");
+            std::process::exit(2);
+        }
+        if let Err(e) = utils::check_and_acquire_privileges(&args).await {
+            eprintln!("pingx: {}", e);
+            std::process::exit(1);
+        }
+        let session = traceroute::TraceSession::new(args);
+        if let Err(e) = session.run().await {
+            eprintln!("pingx: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // GeoIP Fetch
     if args.fetch_geo {

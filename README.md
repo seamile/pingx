@@ -104,6 +104,23 @@ Supports probing multiple targets simultaneously. Results are displayed interlea
 pingx 1.1.1.1 www.github.com
 ```
 
+### Traceroute Mode
+
+Use `-R` to trace the route to one IPv4, IPv6, or domain target. An optional second positional argument sets the total IP packet size, matching system `traceroute`:
+
+```shell
+pingx -R 1.1.1.1
+pingx -R 2400:3200::1
+pingx -R example.com
+pingx -R -4 --max-hops 24 example.com
+pingx -R example.com 64
+pingx -R -I en0 example.com
+```
+
+Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. RTT is shown as `min/avg/max`; `*` marks an incomplete set of replies. A hop answered by multiple nodes gets one row per node, each with its own hostname and location. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size.
+
+Traceroute requires RAW ICMP privileges on Unix. There is no traceroute support on Windows. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
+
 ### GeoIP Lookup
 
 Retrieve geographical information for IP addresses. The first run will guide you through downloading the IP2Location database.
@@ -139,6 +156,7 @@ pingx -g 8.8.8.8 --json
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
 - `-t <TTL>`: Set the IP Time to Live (default 64).
 - `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
+- `--max-hops <N>`: Traceroute hop limit (default 64; `-R` only).
 - `-I <IFACE>`: Specify network interface to bind to (e.g., `en0`, `eth0`, `utun1`).
 - `-q`: Quiet output. Only displays summary statistics.
 
@@ -251,6 +269,23 @@ pingx 可以并发对多个目标以不同协议进行检测。结果将交替�
 pingx 1.1.1.1 www.github.com
 ```
 
+### 路由追踪模式
+
+使用 `-R` 追踪一个 IPv4、IPv6 或域名目标；可在目标后添加一个可选的 IP 报文总长度，与系统 `traceroute` 一致：
+
+```shell
+pingx -R 1.1.1.1
+pingx -R 2400:3200::1
+pingx -R example.com
+pingx -R -4 --max-hops 24 example.com
+pingx -R example.com 64
+pingx -R -I en0 example.com
+```
+
+每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。RTT 显示为 `min/avg/max`；探测未全部返回时追加 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示主机名和位置。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 IP 报文总长度。
+
+Unix 下需要 RAW ICMP 权限；Windows 不支持路由追踪。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
+
 ### GeoIP 位置查询
 
 获取 IP 地址的物理地理位置信息。第一次运行会引导你下载 IP2Location 数据库。
@@ -286,5 +321,6 @@ pingx -g 8.8.8.8 --json
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
 - `-s <SIZE>`: ICMP 数据包大小（默认 56 字节）。
+- `--max-hops <N>`: 路由追踪最大跳数（默认 64，仅用于 `-R`）。
 - `-I <IFACE>`: 指定探测流量从哪个网卡接口发送（如 `en0`、`eth0`、`utun1`）。
 - `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。

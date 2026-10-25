@@ -20,6 +20,10 @@ pub struct GeoIpManager {
 }
 
 impl GeoIpManager {
+    pub fn has_databases(&self) -> bool {
+        self.db_v4.is_some() || self.db_v6.is_some()
+    }
+
     pub fn new() -> Result<Self> {
         let config_manager = ConfigManager::new()?;
         let config_dir = config_manager.get_config_dir();
@@ -267,87 +271,6 @@ pub struct GeoRecord {
     pub longitude: f32,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_geo_ip_manager_new_no_db() {
-        // This test assumes databases might not exist in the test environment,
-        // or checks graceful fallback.
-        // Since we can't easily mock file system existence for integration tests without temp dirs,
-        // we check if it returns Ok regardless (it returns Ok with None dbs).
-        let manager = GeoIpManager::new();
-        assert!(manager.is_ok());
-        let _manager = manager.unwrap();
-        // If DBs missing, these should be None
-        // We can't assert strict None/Some because local dev env might have them.
-        // But we can check lookup returns None if we force empty manager
-        let empty_manager = GeoIpManager {
-            config_manager: ConfigManager::new().unwrap(),
-            db_v4: None,
-            db_v6: None,
-        };
-        assert!(empty_manager.lookup("8.8.8.8".parse().unwrap()).is_none());
-    }
-
-    #[test]
-    fn test_extract_zip_recursive() -> Result<()> {
-        use std::io::Write;
-
-        // Setup temp dir
-        let temp_dir = std::env::temp_dir().join("pingx_test_extract");
-        if temp_dir.exists() {
-            std::fs::remove_dir_all(&temp_dir)?;
-        }
-        std::fs::create_dir_all(&temp_dir)?;
-
-        let zip_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("out");
-        std::fs::create_dir_all(&dest_dir)?;
-
-        // Create a ZIP file with nested structure
-        // root/
-        //   nested/
-        //     DATA.TXT
-        //     deep/
-        //       TARGET.BIN
-        {
-            let file = std::fs::File::create(&zip_path)?;
-            let mut zip = zip::ZipWriter::new(file);
-
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-
-            zip.start_file("nested/DATA.TXT", options)?;
-            zip.write_all(b"dummy data")?;
-
-            // Case insensitive check: Target.Bin
-            zip.start_file("nested/deep/Target.Bin", options)?;
-            zip.write_all(b"DB CONTENT")?;
-
-            zip.finish()?;
-        }
-
-        // Test extraction
-        let extracted_name = extract_zip(&zip_path, &dest_dir)?;
-
-        // Should return the filename found
-        assert_eq!(extracted_name, "Target.Bin");
-
-        // Check if file exists in dest_dir
-        let extracted_path = dest_dir.join("Target.Bin");
-        assert!(extracted_path.exists());
-
-        let content = std::fs::read_to_string(extracted_path)?;
-        assert_eq!(content, "DB CONTENT");
-
-        // Cleanup
-        std::fs::remove_dir_all(&temp_dir)?;
-        Ok(())
-    }
-}
-
 fn prompt_for_token() -> Result<String> {
     print!("Enter your Download Token: ");
     io::stdout().flush()?;
@@ -468,5 +391,58 @@ pub fn print_geo_table(records: &[GeoRecord]) {
             w_lat = w_lat,
             w_lon = w_lon
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_geo_ip_manager_new_no_db() {
+        let manager = GeoIpManager::new();
+        assert!(manager.is_ok());
+        let _manager = manager.unwrap();
+        let empty_manager = GeoIpManager {
+            config_manager: ConfigManager::new().unwrap(),
+            db_v4: None,
+            db_v6: None,
+        };
+        assert!(empty_manager.lookup("8.8.8.8".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn test_extract_zip_recursive() -> Result<()> {
+        use std::io::Write;
+
+        let temp_dir = std::env::temp_dir().join("pingx_test_extract");
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)?;
+        }
+        std::fs::create_dir_all(&temp_dir)?;
+
+        let zip_path = temp_dir.join("test.zip");
+        let dest_dir = temp_dir.join("out");
+        std::fs::create_dir_all(&dest_dir)?;
+
+        {
+            let file = std::fs::File::create(&zip_path)?;
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("nested/DATA.TXT", options)?;
+            zip.write_all(b"dummy data")?;
+            zip.start_file("nested/deep/Target.Bin", options)?;
+            zip.write_all(b"DB CONTENT")?;
+            zip.finish()?;
+        }
+
+        let extracted_name = extract_zip(&zip_path, &dest_dir)?;
+        assert_eq!(extracted_name, "Target.Bin");
+        let extracted_path = dest_dir.join("Target.Bin");
+        assert!(extracted_path.exists());
+        assert_eq!(std::fs::read_to_string(extracted_path)?, "DB CONTENT");
+        std::fs::remove_dir_all(&temp_dir)?;
+        Ok(())
     }
 }
