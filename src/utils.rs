@@ -335,17 +335,8 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         false
     }
 
-    // Try to create an ICMP socket to check permissions.
-    // We try DGRAM first (unprivileged), then RAW.
-    // If DGRAM works, we don't need to prompt.
-    // If DGRAM fails and RAW works, we don't need to prompt.
-    // If both fail, and RAW failed with PermissionDenied, we prompt.
-
-    let can_create_dgram = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
-    if !cli.traceroute {
-        return Ok(());
-    }
-    if can_create_dgram {
+    // Linux traceroute uses RAW sockets even when unprivileged ping is available.
+    if !cli.traceroute && Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok() {
         return Ok(());
     }
 
