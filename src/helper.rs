@@ -875,9 +875,11 @@ mod macos {
         );
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        let request: Request = read_frame(&mut reader, MAX_REQUEST).await?.ok_or_else(|| {
-            anyhow::anyhow!("helper connection closed before a request was received")
-        })?;
+        let request: Request = read_request(&mut reader, Duration::from_secs(3))
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("helper connection closed before a request was received")
+            })?;
         anyhow::ensure!(
             request.protocol_version == PROTOCOL_VERSION,
             "protocol version mismatch"
@@ -1079,6 +1081,15 @@ mod macos {
             }
         }
         Ok(Some(serde_json::from_slice(&data)?))
+    }
+
+    async fn read_request(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        timeout: Duration,
+    ) -> Result<Option<Request>> {
+        tokio::time::timeout(timeout, read_frame(reader, MAX_REQUEST))
+            .await
+            .map_err(|_| anyhow::anyhow!("helper request timed out"))?
     }
 
     async fn write_frame<T: Serialize>(
@@ -1365,6 +1376,17 @@ mod macos {
             let (reader, _) = server.into_split();
             let mut reader = BufReader::new(reader);
             assert!(read_frame::<ClientControl>(&mut reader, 4).await.is_err());
+        }
+
+        #[tokio::test]
+        async fn helper_requests_have_a_deadline() {
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (reader, _) = server.into_split();
+            let mut reader = BufReader::new(reader);
+            let error = read_request(&mut reader, Duration::from_millis(10))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("timed out"));
         }
 
         #[tokio::test]
