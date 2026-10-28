@@ -52,7 +52,7 @@ pub struct Cli {
     )]
     pub ttl: u32,
 
-    /// Size of ICMP or UDP payload in bytes. TCP SYN probes ignore this option.
+    /// Size of ICMP or UDP payload in bytes, up to 65507 for UDP. TCP SYN probes ignore this option.
     #[arg(
         short = 's',
         default_value = "56",

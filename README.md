@@ -193,7 +193,7 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: Stop running after deadline seconds.
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
 - `-t <TTL>`: Set the IP Time to Live (default 64).
-- `-s <SIZE>`: Size of ICMP or UDP payload in bytes (default 56); TCP probes ignore it.
+- `-s <SIZE>`: Size of ICMP or UDP payload in bytes (default 56); UDP payloads are limited to 65507 bytes, and TCP probes ignore it.
 - `--max-hops <N>`: Traceroute hop limit (default 64; `-R` only).
 - `-T` / `--tcp`: Use half-open TCP SYN probing (default port 80).
 - `-U` / `--udp`: Use UDP (default port 33434).
@@ -397,7 +397,7 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
-- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节）；TCP 探测忽略该参数。
+- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节，UDP 最大 65507 字节）；TCP 探测忽略该参数。
 - `--max-hops <N>`: 路由追踪最大跳数（默认 64，仅用于 `-R`）。
 - `-T` / `--tcp`: 使用半开 TCP SYN 探测（默认端口 80）。
 - `-U` / `--udp`: 使用 UDP（默认端口 33434）。
