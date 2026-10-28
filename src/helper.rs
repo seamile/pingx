@@ -108,6 +108,7 @@ mod macos {
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
+    const MAX_JSON_OUTPUT: usize = 16 * 1024 * 1024;
     const ROOT_COPY_SCRIPT: &str = r#"set -eu
 work=$(/usr/bin/mktemp -d /private/tmp/pingx-helper.XXXXXX)
 trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
@@ -554,6 +555,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         .await?;
         let mut reader = BufReader::new(reader);
         let mut json_data = String::new();
+        let mut json_line_count = 0usize;
         loop {
             tokio::select! {
                 signal = tokio::signal::ctrl_c() => {
@@ -573,8 +575,11 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                         ResponseResult::Output { stream, data } => match stream {
                             OutputStream::Stdout => {
                                 if json_file_requested {
-                                    json_data.push_str(&data);
-                                    json_data.push('\n');
+                                    append_json_line(
+                                        &mut json_data,
+                                        &mut json_line_count,
+                                        &data,
+                                    )?;
                                 } else {
                                     let mut output = io::stdout().lock();
                                     writeln!(output, "{data}")?;
@@ -1162,6 +1167,23 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             }
         }
         Ok(Some(serde_json::from_slice(&data)?))
+    }
+
+    fn append_json_line(data: &mut String, line_count: &mut usize, line: &str) -> Result<()> {
+        let separator = usize::from(*line_count != 0);
+        anyhow::ensure!(
+            data.len()
+                .checked_add(separator)
+                .and_then(|size| size.checked_add(line.len()))
+                .is_some_and(|size| size <= MAX_JSON_OUTPUT),
+            "JSON output exceeds {MAX_JSON_OUTPUT} bytes"
+        );
+        if separator != 0 {
+            data.push('\n');
+        }
+        data.push_str(line);
+        *line_count += 1;
+        Ok(())
     }
 
     async fn read_request(
@@ -1964,6 +1986,22 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 .unwrap();
             assert!(line.len() > MAX_REQUEST);
             task.await.unwrap().unwrap();
+        }
+
+        #[test]
+        fn json_lines_preserve_empty_output_and_bound_accumulation() {
+            let mut data = String::new();
+            let mut lines = 0;
+            append_json_line(&mut data, &mut lines, "").unwrap();
+            assert!(data.is_empty());
+            assert_eq!(lines, 1);
+
+            append_json_line(&mut data, &mut lines, "{}").unwrap();
+            assert_eq!(data, "\n{}");
+            assert_eq!(lines, 2);
+
+            data = "x".repeat(MAX_JSON_OUTPUT);
+            assert!(append_json_line(&mut data, &mut lines, "x").is_err());
         }
 
         #[test]
