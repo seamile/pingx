@@ -258,25 +258,51 @@ fn raw_protocol_for_cli(cli: &crate::cli::Cli) -> Result<Option<socket2::Protoco
     use crate::cli::Protocol;
 
     if cli.traceroute {
-        return Ok(match cli.trace_target()?.protocol {
+        let target = cli.trace_target()?;
+        let ipv6 = cli.ipv6
+            || target
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|addr| addr.is_ipv6());
+        return Ok(match target.protocol {
+            Protocol::Icmp if ipv6 => Some(socket2::Protocol::ICMPV6),
             Protocol::Icmp => Some(socket2::Protocol::ICMPV4),
             Protocol::Tcp(_) => Some(socket2::Protocol::TCP),
             Protocol::Udp(_) if cfg!(target_os = "linux") => None,
+            Protocol::Udp(_) if ipv6 => Some(socket2::Protocol::ICMPV6),
             Protocol::Udp(_) => Some(socket2::Protocol::ICMPV4),
             Protocol::Http(_) => unreachable!("HTTP traceroute is rejected by target parsing"),
         });
     }
 
     let mut needs_icmp = false;
+    let mut ipv6 = cli.ipv6;
     for target in &cli.targets {
-        match cli.target_spec(target)?.protocol {
+        let target = cli.target_spec(target)?;
+        match target.protocol {
             Protocol::Tcp(_) => return Ok(Some(socket2::Protocol::TCP)),
-            Protocol::Icmp => needs_icmp = true,
-            Protocol::Udp(_) if !cfg!(target_os = "linux") => needs_icmp = true,
+            Protocol::Icmp => {
+                needs_icmp = true;
+                ipv6 |= target
+                    .host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|addr| addr.is_ipv6());
+            }
+            Protocol::Udp(_) if !cfg!(target_os = "linux") => {
+                needs_icmp = true;
+                ipv6 |= target
+                    .host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|addr| addr.is_ipv6());
+            }
             Protocol::Udp(_) | Protocol::Http(_) => {}
         }
     }
-    Ok(needs_icmp.then_some(socket2::Protocol::ICMPV4))
+    Ok(needs_icmp.then_some(if ipv6 {
+        socket2::Protocol::ICMPV6
+    } else {
+        socket2::Protocol::ICMPV4
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -303,14 +329,22 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         false
     }
 
-    if raw_protocol == Protocol::ICMPV4
-        && !cli.traceroute
-        && Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok()
-    {
-        return Ok(());
+    if !cli.traceroute && matches!(raw_protocol, Protocol::ICMPV4 | Protocol::ICMPV6) {
+        let domain = if raw_protocol == Protocol::ICMPV6 {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        if Socket::new(domain, Type::DGRAM, Some(raw_protocol)).is_ok() {
+            return Ok(());
+        }
     }
 
-    let domain = if cli.ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if raw_protocol == Protocol::ICMPV6 || cli.ipv6 {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     match Socket::new(domain, Type::RAW, Some(raw_protocol)) {
         Ok(_) => return Ok(()),
         Err(e) => {
@@ -405,21 +439,21 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     let Some(protocol) = raw_protocol_for_cli(cli)? else {
         return Ok(());
     };
-    if protocol == Protocol::ICMPV4 && !cli.traceroute {
-        let v4 = || Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
-        let v6 = || Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6)).is_ok();
-        let available = if cli.ipv4 {
-            v4()
-        } else if cli.ipv6 {
-            v6()
+    if !cli.traceroute && matches!(protocol, Protocol::ICMPV4 | Protocol::ICMPV6) {
+        let domain = if protocol == Protocol::ICMPV6 {
+            Domain::IPV6
         } else {
-            v4() && v6()
+            Domain::IPV4
         };
-        if available {
+        if Socket::new(domain, Type::DGRAM, Some(protocol)).is_ok() {
             return Ok(());
         }
     }
-    let domain = if cli.ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if protocol == Protocol::ICMPV6 || cli.ipv6 {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     match Socket::new(domain, Type::RAW, Some(protocol)) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
@@ -595,6 +629,36 @@ mod tests {
 
         let res = resolve_host("::1", IpVersion::V4).await;
         assert!(res.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_icmp_protocol_matches_address_family() {
+        use clap::Parser;
+
+        let ipv4 = crate::cli::Cli::try_parse_from(["pingx", "127.0.0.1"]).unwrap();
+        assert_eq!(
+            raw_protocol_for_cli(&ipv4).unwrap(),
+            Some(socket2::Protocol::ICMPV4)
+        );
+
+        let ipv6 = crate::cli::Cli::try_parse_from(["pingx", "-6", "::1"]).unwrap();
+        assert_eq!(
+            raw_protocol_for_cli(&ipv6).unwrap(),
+            Some(socket2::Protocol::ICMPV6)
+        );
+
+        let literal = crate::cli::Cli::try_parse_from(["pingx", "::1"]).unwrap();
+        assert_eq!(
+            raw_protocol_for_cli(&literal).unwrap(),
+            Some(socket2::Protocol::ICMPV6)
+        );
+
+        let trace = crate::cli::Cli::try_parse_from(["pingx", "-R", "example.com"]).unwrap();
+        assert_eq!(
+            raw_protocol_for_cli(&trace).unwrap(),
+            Some(socket2::Protocol::ICMPV4)
+        );
     }
 
     #[test]
