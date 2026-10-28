@@ -62,7 +62,6 @@ mod platform {
     const TCP_RST: u8 = 0x04;
     const TCP_ACK: u8 = 0x10;
     const IDENTIFIER: u16 = 0x5047;
-    const TCP_SOURCE_PORT_BASE: u16 = 33434;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum TraceProtocol {
@@ -96,7 +95,7 @@ mod platform {
         destination: Option<SocketAddr>,
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Debug)]
     struct Probe {
         ttl: u8,
         token: u16,
@@ -104,6 +103,7 @@ mod platform {
         deadline: Instant,
         reply: Option<(IpAddr, Duration, ReplyKind)>,
         cancelled: bool,
+        reservation: Option<Socket>,
     }
 
     #[derive(Debug)]
@@ -128,7 +128,9 @@ mod platform {
 
     struct ProbeRequest {
         target: IpAddr,
+        local: IpAddr,
         ident: u16,
+        tcp_seed: u32,
         protocol: TraceProtocol,
         base_port: u16,
         payload_size: usize,
@@ -145,7 +147,7 @@ mod platform {
     enum ProbePacket {
         Icmp(Vec<u8>),
         Udp(Vec<u8>, u16),
-        Tcp(Vec<u8>, u16),
+        Tcp(Vec<u8>, u16, u32),
     }
 
     pub(super) async fn run_trace(cli: Cli) -> Result<()> {
@@ -187,7 +189,8 @@ mod platform {
                 "UDP traceroute port range exceeds 65535"
             );
         }
-        let socket = Arc::new(TraceSocket::new(target, protocol, trace_port)?);
+        let local = crate::probe::tcp_syn::local_address_for(target)?;
+        let socket = Arc::new(TraceSocket::new(local, target, protocol, trace_port)?);
 
         println!(
             "{}",
@@ -195,7 +198,8 @@ mod platform {
         );
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
-        let receiver = spawn_receiver(socket.clone(), target, reply_tx);
+        let tcp_seed = crate::probe::tcp_syn::next_sequence();
+        let receiver = spawn_receiver(socket.clone(), target, tcp_seed, reply_tx);
         let ident = trace_ident();
         let probe_overhead = match protocol {
             TraceProtocol::Icmp => 8,
@@ -210,7 +214,9 @@ mod platform {
             socket.as_ref(),
             ProbeRequest {
                 target,
+                local,
                 ident,
+                tcp_seed,
                 protocol,
                 base_port: trace_port,
                 payload_size,
@@ -241,7 +247,9 @@ mod platform {
     ) -> Result<ProbeRun> {
         let ProbeRequest {
             target,
+            local,
             ident,
+            tcp_seed,
             protocol,
             base_port,
             payload_size,
@@ -266,23 +274,45 @@ mod platform {
                 let ttl = u8::try_from(next_ttl).expect("max-hops is limited to u8");
                 for _ in 0..PROBES_PER_HOP {
                     let seq = next_sequence(&mut sequence, &probes);
-                    let token = port_for(seq, protocol, base_port);
-                    let packet = match protocol {
-                        TraceProtocol::Icmp => ProbePacket::Icmp(
-                            IcmpPacket::new_request(
-                                target.is_ipv6(),
-                                ident,
+                    let (token, packet, reservation) = match protocol {
+                        TraceProtocol::Icmp => {
+                            let token = port_for(seq, protocol, base_port);
+                            (
                                 token,
-                                vec![0; payload_size],
+                                ProbePacket::Icmp(
+                                    IcmpPacket::new_request(
+                                        target.is_ipv6(),
+                                        ident,
+                                        token,
+                                        vec![0; payload_size],
+                                    )
+                                    .encode(),
+                                ),
+                                None,
                             )
-                            .encode(),
-                        ),
+                        }
                         TraceProtocol::Udp => {
+                            let token = port_for(seq, protocol, base_port);
                             let mut payload = vec![0; payload_size.max(4)];
                             payload[..4].copy_from_slice(&udp_probe_marker(ident, token));
-                            ProbePacket::Udp(payload, token)
+                            (token, ProbePacket::Udp(payload, token), None)
                         }
-                        TraceProtocol::Tcp => ProbePacket::Tcp(vec![0; payload_size], token),
+                        TraceProtocol::Tcp => {
+                            let reservation = crate::probe::tcp_syn::reserve_source_port(local)?;
+                            let token = reservation
+                                .local_addr()?
+                                .as_socket()
+                                .ok_or_else(|| {
+                                    io::Error::other("local TCP source port unavailable")
+                                })?
+                                .port();
+                            let sequence = tcp_probe_sequence(tcp_seed, token);
+                            (
+                                token,
+                                ProbePacket::Tcp(vec![0; payload_size], token, sequence),
+                                Some(reservation),
+                            )
+                        }
                     };
                     probes.insert(
                         seq,
@@ -293,6 +323,7 @@ mod platform {
                             deadline: Instant::now(),
                             reply: None,
                             cancelled: false,
+                            reservation,
                         },
                     );
                     sender.send_probe(packet, target, ttl).await?;
@@ -319,6 +350,11 @@ mod platform {
             }
 
             let now = Instant::now();
+            for probe in probes.values_mut() {
+                if !is_probe_active(probe, now) {
+                    probe.reservation.take();
+                }
+            }
             let wait = probes
                 .values()
                 .filter(|p| !p.cancelled && p.reply.is_none() && p.deadline > now)
@@ -347,6 +383,7 @@ mod platform {
                     {
                         let reply_ttl = probe.ttl;
                         let rtt = reply_rtt(probe.started, reply);
+                        probe.reservation.take();
                         probe.reply = Some((reply.ip, rtt, reply.kind));
                         if reply.kind == ReplyKind::Reached {
                             stop_hops.entry(reply_ttl).or_insert(ReplyKind::Reached);
@@ -416,12 +453,12 @@ mod platform {
         match protocol {
             TraceProtocol::Icmp => sequence,
             TraceProtocol::Udp => base.wrapping_add(sequence - 1),
-            TraceProtocol::Tcp => {
-                let available = u16::MAX - TCP_SOURCE_PORT_BASE + 1;
-                let offset = (sequence - 1) % available;
-                TCP_SOURCE_PORT_BASE.wrapping_add(offset)
-            }
+            TraceProtocol::Tcp => unreachable!("TCP probes reserve an ephemeral source port"),
         }
+    }
+
+    fn tcp_probe_sequence(seed: u32, source_port: u16) -> u32 {
+        seed ^ u32::from(source_port).wrapping_mul(0x9e37_79b1)
     }
 
     fn packet_size(
@@ -520,7 +557,12 @@ mod platform {
 
     #[cfg(unix)]
     impl TraceSocket {
-        fn new(target: IpAddr, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+        fn new(
+            local: IpAddr,
+            target: IpAddr,
+            protocol: TraceProtocol,
+            trace_port: u16,
+        ) -> io::Result<Self> {
             let v6 = target.is_ipv6();
             let send = match protocol {
                 TraceProtocol::Icmp => Self::icmp_socket(v6)?,
@@ -593,7 +635,6 @@ mod platform {
             };
             #[cfg(target_os = "macos")]
             let tcp_recv = if protocol == TraceProtocol::Tcp {
-                let local = crate::probe::tcp_syn::local_address_for(target)?;
                 Some(AsyncMutex::new(crate::probe::tcp_capture::TcpCapture::new(
                     local,
                 )?))
@@ -664,8 +705,15 @@ mod platform {
             let (data, port) = match (&self.protocol, probe) {
                 (TraceProtocol::Icmp, ProbePacket::Icmp(data)) => (data, 0),
                 (TraceProtocol::Udp, ProbePacket::Udp(data, port)) => (data, port),
-                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port)) => (
-                    build_tcp_packet(target, self.trace_port, source_port, &payload, ttl)?,
+                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port, sequence)) => (
+                    build_tcp_packet(
+                        target,
+                        self.trace_port,
+                        source_port,
+                        sequence,
+                        &payload,
+                        ttl,
+                    )?,
                     0,
                 ),
                 _ => {
@@ -900,9 +948,13 @@ mod platform {
 
     #[cfg(windows)]
     impl TraceSocket {
-        fn new(target: IpAddr, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+        fn new(
+            local: IpAddr,
+            target: IpAddr,
+            protocol: TraceProtocol,
+            trace_port: u16,
+        ) -> io::Result<Self> {
             let v6 = target.is_ipv6();
-            let local = crate::probe::tcp_syn::local_address_for(target)?;
             let send = match protocol {
                 TraceProtocol::Icmp => WindowsSend::Datagram(probe_socket(local, v6, protocol)?),
                 TraceProtocol::Udp => WindowsSend::Datagram(probe_socket(local, v6, protocol)?),
@@ -963,9 +1015,15 @@ mod platform {
                         }
                     }
                 }
-                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port)) => {
-                    let packet =
-                        build_tcp_packet(target, self.trace_port, source_port, &payload, ttl)?;
+                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port, sequence)) => {
+                    let packet = build_tcp_packet(
+                        target,
+                        self.trace_port,
+                        source_port,
+                        sequence,
+                        &payload,
+                        ttl,
+                    )?;
                     let WindowsSend::Injector(injector) = &self.send else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -1156,6 +1214,7 @@ mod platform {
         target: IpAddr,
         port: u16,
         source_port: u16,
+        sequence: u32,
         payload: &[u8],
         ttl: u8,
     ) -> io::Result<Vec<u8>> {
@@ -1166,7 +1225,7 @@ mod platform {
             crate::probe::tcp_syn::TcpSegment {
                 source_port,
                 target_port: port,
-                sequence: u32::from(source_port),
+                sequence,
                 acknowledgement: 0,
                 flags: TCP_SYN,
                 payload,
@@ -1231,6 +1290,7 @@ mod platform {
     fn spawn_receiver(
         socket: Arc<TraceSocket>,
         target: IpAddr,
+        tcp_seed: u32,
         tx: mpsc::Sender<Reply>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -1317,6 +1377,7 @@ mod platform {
                                 target,
                                 socket.protocol,
                                 socket.trace_port,
+                                tcp_seed,
                                 received_at,
                             )
                         };
@@ -1327,12 +1388,13 @@ mod platform {
                             target,
                             socket.protocol,
                             socket.trace_port,
+                            tcp_seed,
                             received_at,
                         );
                         if socket.protocol == TraceProtocol::Tcp
                             && from == target
                             && let Some((source_port, sequence)) =
-                                tcp_reset_fields(&data, target, socket.trace_port)
+                                tcp_reset_fields(&data, target, socket.trace_port, tcp_seed)
                         {
                             let _ = socket
                                 .send_tcp_reset(target, source_port, socket.trace_port, sequence)
@@ -1428,6 +1490,7 @@ mod platform {
         target: IpAddr,
         protocol: TraceProtocol,
         trace_port: u16,
+        tcp_seed: u32,
         received_at: Instant,
     ) -> Option<Reply> {
         match protocol {
@@ -1437,15 +1500,33 @@ mod platform {
             TraceProtocol::Icmp => parse_reply_v4(data, from, target, received_at),
             TraceProtocol::Udp => {
                 if target.is_ipv4() {
-                    parse_icmp_probe_reply_v4(data, from, target, 17, trace_port, received_at)
+                    parse_icmp_probe_reply_v4(
+                        data,
+                        from,
+                        target,
+                        17,
+                        trace_port,
+                        tcp_seed,
+                        received_at,
+                    )
                 } else {
-                    parse_icmp_probe_reply_v6(data, from, target, 17, trace_port, received_at)
+                    parse_icmp_probe_reply_v6(
+                        data,
+                        from,
+                        target,
+                        17,
+                        trace_port,
+                        tcp_seed,
+                        received_at,
+                    )
                 }
             }
             TraceProtocol::Tcp if target.is_ipv6() => {
-                parse_tcp_reply_v6(data, from, target, trace_port, received_at)
+                parse_tcp_reply_v6(data, from, target, trace_port, tcp_seed, received_at)
             }
-            TraceProtocol::Tcp => parse_tcp_reply_v4(data, from, target, trace_port, received_at),
+            TraceProtocol::Tcp => {
+                parse_tcp_reply_v4(data, from, target, trace_port, tcp_seed, received_at)
+            }
         }
     }
 
@@ -1560,6 +1641,7 @@ mod platform {
         from: IpAddr,
         target: IpAddr,
         trace_port: u16,
+        tcp_seed: u32,
         received_at: Instant,
     ) -> Option<Reply> {
         let tcp = match data {
@@ -1583,7 +1665,7 @@ mod platform {
             if u16::from_be_bytes([tcp[0], tcp[1]]) == trace_port
                 && tcp[13] & TCP_ACK != 0
                 && (tcp[13] & TCP_RST != 0 || tcp[13] & TCP_SYN != 0)
-                && acknowledgement == u32::from(local_port) + 1
+                && acknowledgement == tcp_probe_sequence(tcp_seed, local_port).wrapping_add(1)
             {
                 return Some(Reply {
                     sequence: 0,
@@ -1595,10 +1677,15 @@ mod platform {
                 });
             }
         }
-        parse_icmp_probe_reply_v4(data, from, target, 6, trace_port, received_at)
+        parse_icmp_probe_reply_v4(data, from, target, 6, trace_port, tcp_seed, received_at)
     }
 
-    fn tcp_reset_fields(data: &[u8], target: IpAddr, target_port: u16) -> Option<(u16, u32)> {
+    fn tcp_reset_fields(
+        data: &[u8],
+        target: IpAddr,
+        target_port: u16,
+        tcp_seed: u32,
+    ) -> Option<(u16, u32)> {
         let tcp = match (target, data.first().map(|byte| byte >> 4)) {
             (IpAddr::V4(target), Some(4))
                 if data.get(9) == Some(&6)
@@ -1622,7 +1709,8 @@ mod platform {
         }
         let local_port = u16::from_be_bytes([tcp[2], tcp[3]]);
         let acknowledgement = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
-        (acknowledgement == u32::from(local_port) + 1).then_some((local_port, acknowledgement))
+        (acknowledgement == tcp_probe_sequence(tcp_seed, local_port).wrapping_add(1))
+            .then_some((local_port, acknowledgement))
     }
 
     fn parse_tcp_reply_v6(
@@ -1630,6 +1718,7 @@ mod platform {
         from: IpAddr,
         target: IpAddr,
         trace_port: u16,
+        tcp_seed: u32,
         received_at: Instant,
     ) -> Option<Reply> {
         let tcp = match (target, data.first().map(|byte| byte >> 4)) {
@@ -1646,7 +1735,7 @@ mod platform {
             if u16::from_be_bytes([tcp[0], tcp[1]]) == trace_port
                 && tcp[13] & TCP_ACK != 0
                 && (tcp[13] & TCP_RST != 0 || tcp[13] & TCP_SYN != 0)
-                && acknowledgement == u32::from(local_port) + 1
+                && acknowledgement == tcp_probe_sequence(tcp_seed, local_port).wrapping_add(1)
             {
                 return Some(Reply {
                     sequence: 0,
@@ -1658,7 +1747,7 @@ mod platform {
                 });
             }
         }
-        parse_icmp_probe_reply_v6(data, from, target, 6, trace_port, received_at)
+        parse_icmp_probe_reply_v6(data, from, target, 6, trace_port, tcp_seed, received_at)
     }
 
     fn parse_icmp_probe_reply_v4(
@@ -1667,6 +1756,7 @@ mod platform {
         target: IpAddr,
         protocol: u8,
         trace_port: u16,
+        tcp_seed: u32,
         received_at: Instant,
     ) -> Option<Reply> {
         let (icmp, offset) = strip_ipv4(data)?;
@@ -1703,6 +1793,12 @@ mod platform {
             }
             _ => return None,
         };
+        if protocol == 6
+            && u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]])
+                != tcp_probe_sequence(tcp_seed, token)
+        {
+            return None;
+        }
         let kind = match icmp[0] {
             ICMP_TIME_EXCEEDED_V4 if icmp[1] == 0 => ReplyKind::Hop,
             ICMP_DEST_UNREACH_V4 if from == target && protocol == 17 && icmp[1] == 3 => {
@@ -1727,6 +1823,7 @@ mod platform {
         target: IpAddr,
         protocol: u8,
         trace_port: u16,
+        tcp_seed: u32,
         received_at: Instant,
     ) -> Option<Reply> {
         let packet = IcmpPacket::decode(strip_ipv6_icmp(data)?).ok()?;
@@ -1755,6 +1852,12 @@ mod platform {
             17 if destination_port >= trace_port => destination_port,
             _ => return None,
         };
+        if protocol == 6
+            && u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]])
+                != tcp_probe_sequence(tcp_seed, token)
+        {
+            return None;
+        }
         Some(Reply {
             sequence: 0,
             token,
@@ -2043,6 +2146,8 @@ mod platform {
         use std::sync::Mutex;
         use tokio::sync::mpsc;
 
+        const TCP_SEED: u32 = 0x1234_5678;
+
         #[derive(Default)]
         struct TestSender {
             ttl_log: Mutex<Vec<u8>>,
@@ -2085,7 +2190,9 @@ mod platform {
                 sender,
                 ProbeRequest {
                     target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    local: IpAddr::V4(Ipv4Addr::LOCALHOST),
                     ident: trace_ident(),
+                    tcp_seed: TCP_SEED,
                     protocol: TraceProtocol::Icmp,
                     base_port: 33434,
                     payload_size: 12,
@@ -2115,6 +2222,7 @@ mod platform {
             source: u16,
             destination: u16,
             flags: u8,
+            sequence: u32,
         ) -> Vec<u8> {
             let mut packet = vec![0u8; 40];
             packet[0] = 0x45;
@@ -2126,7 +2234,7 @@ mod platform {
             packet[20..22].copy_from_slice(&source.to_be_bytes());
             packet[22..24].copy_from_slice(&destination.to_be_bytes());
             if flags & 0x10 != 0 {
-                packet[28..32].copy_from_slice(&(u32::from(destination) + 1).to_be_bytes());
+                packet[28..32].copy_from_slice(&(sequence.wrapping_add(1)).to_be_bytes());
             }
             packet[32] = 0x50;
             packet[33] = flags;
@@ -2139,6 +2247,7 @@ mod platform {
             source: u16,
             destination: u16,
             flags: u8,
+            sequence: u32,
         ) -> Vec<u8> {
             let mut packet = vec![0u8; 60];
             packet[0] = 0x60;
@@ -2150,7 +2259,7 @@ mod platform {
             packet[40..42].copy_from_slice(&source.to_be_bytes());
             packet[42..44].copy_from_slice(&destination.to_be_bytes());
             if flags & 0x10 != 0 {
-                packet[48..52].copy_from_slice(&(u32::from(destination) + 1).to_be_bytes());
+                packet[48..52].copy_from_slice(&(sequence.wrapping_add(1)).to_be_bytes());
             }
             packet[52] = 0x50;
             packet[53] = flags;
@@ -2289,10 +2398,11 @@ mod platform {
             );
         }
 
-        fn tcp_header(source: u16, destination: u16, flags: u8) -> [u8; 20] {
+        fn tcp_header(source: u16, destination: u16, flags: u8, sequence: u32) -> [u8; 20] {
             let mut tcp = [0u8; 20];
             tcp[0..2].copy_from_slice(&source.to_be_bytes());
             tcp[2..4].copy_from_slice(&destination.to_be_bytes());
+            tcp[4..8].copy_from_slice(&sequence.to_be_bytes());
             tcp[12] = 0x50;
             tcp[13] = flags;
             tcp
@@ -2316,6 +2426,7 @@ mod platform {
                 IpAddr::V4(target),
                 TraceProtocol::Udp,
                 33442,
+                TCP_SEED,
                 Instant::now(),
             )
             .unwrap();
@@ -2328,6 +2439,7 @@ mod platform {
                     IpAddr::V4(target),
                     TraceProtocol::Udp,
                     33443,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .is_none()
@@ -2344,6 +2456,7 @@ mod platform {
                 IpAddr::V4(target),
                 TraceProtocol::Udp,
                 33442,
+                TCP_SEED,
                 Instant::now(),
             )
             .unwrap();
@@ -2356,8 +2469,13 @@ mod platform {
             let target = Ipv4Addr::new(198, 51, 100, 1);
             let source_port = 33442;
             let target_port = 443;
-            let embedded =
-                ipv4_transport_packet(hop, target, 6, &tcp_header(source_port, target_port, 0x02));
+            let sequence = tcp_probe_sequence(TCP_SEED, source_port);
+            let embedded = ipv4_transport_packet(
+                hop,
+                target,
+                6,
+                &tcp_header(source_port, target_port, 0x02, sequence),
+            );
             let packet = ipv4_packet(
                 hop,
                 Ipv4Addr::LOCALHOST,
@@ -2369,6 +2487,7 @@ mod platform {
                 IpAddr::V4(target),
                 TraceProtocol::Tcp,
                 target_port,
+                TCP_SEED,
                 Instant::now(),
             )
             .unwrap();
@@ -2388,6 +2507,7 @@ mod platform {
                     IpAddr::V4(target),
                     TraceProtocol::Tcp,
                     target_port,
+                    TCP_SEED,
                     Instant::now()
                 )
                 .unwrap()
@@ -2402,6 +2522,7 @@ mod platform {
                     target_port,
                     source_port,
                     flags,
+                    sequence,
                 );
                 let reply = parse_reply(
                     &packet,
@@ -2409,6 +2530,7 @@ mod platform {
                     IpAddr::V4(target),
                     TraceProtocol::Tcp,
                     target_port,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .expect("parse TCP control reply");
@@ -2416,11 +2538,17 @@ mod platform {
                 assert_eq!(reply.kind, ReplyKind::Reached);
             }
 
-            let syn_ack =
-                tcp_control_packet(target, Ipv4Addr::LOCALHOST, target_port, source_port, 0x12);
+            let syn_ack = tcp_control_packet(
+                target,
+                Ipv4Addr::LOCALHOST,
+                target_port,
+                source_port,
+                0x12,
+                sequence,
+            );
             assert_eq!(
-                tcp_reset_fields(&syn_ack, IpAddr::V4(target), target_port),
-                Some((source_port, u32::from(source_port) + 1))
+                tcp_reset_fields(&syn_ack, IpAddr::V4(target), target_port, TCP_SEED),
+                Some((source_port, sequence.wrapping_add(1)))
             );
             let mut wrong_ack = syn_ack.clone();
             wrong_ack[28..32].copy_from_slice(&1u32.to_be_bytes());
@@ -2431,6 +2559,7 @@ mod platform {
                     IpAddr::V4(target),
                     TraceProtocol::Tcp,
                     target_port,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .is_none()
@@ -2438,11 +2567,19 @@ mod platform {
 
             let target_v6 = Ipv6Addr::LOCALHOST;
             let reply = parse_reply(
-                &ipv6_tcp_control_packet(target_v6, target_v6, target_port, source_port, 0x12),
+                &ipv6_tcp_control_packet(
+                    target_v6,
+                    target_v6,
+                    target_port,
+                    source_port,
+                    0x12,
+                    sequence,
+                ),
                 IpAddr::V6(target_v6),
                 IpAddr::V6(target_v6),
                 TraceProtocol::Tcp,
                 target_port,
+                TCP_SEED,
                 Instant::now(),
             )
             .expect("parse IPv6 TCP control reply");
@@ -2454,6 +2591,7 @@ mod platform {
                 IpAddr::V4(target),
                 TraceProtocol::Tcp,
                 target_port,
+                TCP_SEED,
                 Instant::now(),
             )
             .expect("parse bare IPv4 TCP reply");
@@ -2464,7 +2602,12 @@ mod platform {
         fn rejects_icmp_errors_for_other_destinations_and_protocols() {
             let hop = Ipv4Addr::new(192, 0, 2, 1);
             let target = Ipv4Addr::new(198, 51, 100, 1);
-            let embedded = ipv4_transport_packet(hop, target, 6, &tcp_header(33442, 443, 0x02));
+            let embedded = ipv4_transport_packet(
+                hop,
+                target,
+                6,
+                &tcp_header(33442, 443, 0x02, tcp_probe_sequence(TCP_SEED, 33442)),
+            );
             let packet = ipv4_packet(
                 hop,
                 Ipv4Addr::LOCALHOST,
@@ -2477,6 +2620,7 @@ mod platform {
                     IpAddr::V4(target),
                     TraceProtocol::Udp,
                     443,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .is_none()
@@ -2488,6 +2632,7 @@ mod platform {
                     IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
                     TraceProtocol::Tcp,
                     443,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .is_none()
@@ -2635,6 +2780,7 @@ mod platform {
                     IpAddr::V4(Ipv4Addr::LOCALHOST),
                     TraceProtocol::Icmp,
                     33434,
+                    TCP_SEED,
                     Instant::now(),
                 )
                 .is_none()
@@ -2766,6 +2912,7 @@ mod platform {
                         deadline: now + Duration::from_secs(1),
                         reply: Some((IpAddr::V4(ip), Duration::from_millis(rtt), ReplyKind::Hop)),
                         cancelled: false,
+                        reservation: None,
                     },
                 );
             }
@@ -2858,6 +3005,7 @@ mod platform {
                         deadline: now + Duration::from_secs(1),
                         reply: None,
                         cancelled: false,
+                        reservation: None,
                     },
                 );
             }
@@ -2874,6 +3022,7 @@ mod platform {
                 deadline: now - Duration::from_millis(1),
                 reply: None,
                 cancelled: false,
+                reservation: None,
             };
             assert!(!is_probe_active(&probe, now));
             assert_eq!(active_probe_count(&HashMap::from([(1, probe)]), now), 0);
@@ -2889,6 +3038,7 @@ mod platform {
                 deadline: now + Duration::from_secs(1),
                 reply: None,
                 cancelled: false,
+                reservation: None,
             };
             let mut probes = HashMap::from([(1, probe(3)), (2, probe(2)), (3, probe(1))]);
             cancel_higher_ttls(&mut probes, 2);
@@ -2992,7 +3142,9 @@ mod platform {
                     &sender,
                     ProbeRequest {
                         target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        local: IpAddr::V4(Ipv4Addr::LOCALHOST),
                         ident: trace_ident(),
+                        tcp_seed: TCP_SEED,
                         protocol: TraceProtocol::Udp,
                         base_port: 33434,
                         payload_size: 4,
@@ -3013,12 +3165,19 @@ mod platform {
 
         #[test]
         fn tcp_packet_has_transport_header_payload_and_probe_ttl() {
-            let packet =
-                build_tcp_packet(IpAddr::V4(Ipv4Addr::LOCALHOST), 443, 33442, &[1, 2, 3], 7)
-                    .unwrap();
+            let packet = build_tcp_packet(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                443,
+                33442,
+                0x1234_5678,
+                &[1, 2, 3],
+                7,
+            )
+            .unwrap();
             assert_eq!(packet.len(), 43);
             assert_eq!(packet[8], 7);
             assert_eq!(&packet[20..24], &[0x82, 0xa2, 0x01, 0xbb]);
+            assert_eq!(&packet[24..28], &0x1234_5678u32.to_be_bytes());
             assert_eq!(&packet[40..], &[1, 2, 3]);
             assert_eq!(
                 tcp_checksum(
@@ -3032,6 +3191,15 @@ mod platform {
             assert_eq!(ip_checksum(&packet[..20]), 0);
             #[cfg(target_os = "macos")]
             assert_eq!(&packet[10..12], &[0, 0]);
+        }
+
+        #[test]
+        fn active_tcp_probes_reserve_distinct_source_ports() {
+            let local = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let first = crate::probe::tcp_syn::reserve_source_port(local).unwrap();
+            let second = crate::probe::tcp_syn::reserve_source_port(local).unwrap();
+            let port = |socket: &Socket| socket.local_addr().unwrap().as_socket().unwrap().port();
+            assert_ne!(port(&first), port(&second));
         }
 
         #[test]
