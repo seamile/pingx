@@ -1379,5 +1379,52 @@ mod macos {
             }
             task.await.unwrap().unwrap();
         }
+
+        #[tokio::test]
+        async fn helper_rejects_an_unauthorized_peer_uid() {
+            let (_client, server) = UnixStream::pair().unwrap();
+            let allowed_uid = (unsafe { libc::geteuid() } as u32).wrapping_add(1);
+            let error = handle_connection(
+                server,
+                &HelperState {
+                    protocol_version: PROTOCOL_VERSION,
+                    allowed_uid,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("not authorized"));
+        }
+
+        #[tokio::test]
+        async fn helper_rejects_a_protocol_version_mismatch() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(async move {
+                handle_connection(
+                    server,
+                    &HelperState {
+                        protocol_version: PROTOCOL_VERSION,
+                        allowed_uid: unsafe { libc::geteuid() } as u32,
+                    },
+                )
+                .await
+            });
+            let (_reader, mut writer) = client.into_split();
+            write_frame(
+                &mut writer,
+                &Request {
+                    protocol_version: PROTOCOL_VERSION.wrapping_add(1),
+                    action: Action::Status,
+                },
+            )
+            .await
+            .unwrap();
+            drop(writer);
+            let error = task.await.unwrap().unwrap_err();
+            assert!(
+                error.to_string().contains("protocol version mismatch"),
+                "{error:#}"
+            );
+        }
     }
 }
