@@ -230,23 +230,26 @@ mod macos {
             })));
         }
 
-        let mut privileged = Vec::new();
-        let mut http = 0usize;
+        let unprivileged_icmp = can_use_unprivileged_icmp(cli);
+        let mut needs_helper = false;
+        let mut has_http = false;
         for target in &cli.targets {
-            match cli.target_spec(target)?.protocol {
-                crate::cli::Protocol::Http(_) => http += 1,
-                _ => privileged.push(target.clone()),
+            let protocol = cli.target_spec(target)?.protocol;
+            if matches!(protocol, crate::cli::Protocol::Http(_)) {
+                has_http = true;
+            } else if protocol_needs_helper(&protocol, unprivileged_icmp) {
+                needs_helper = true;
             }
         }
-        if privileged.is_empty() {
+        if !needs_helper {
             return Ok(None);
         }
         anyhow::ensure!(
-            http == 0,
+            !has_http,
             "HTTP and privileged probes cannot be combined in one helper request; run them separately"
         );
         Ok(Some(Operation::Ping(PingOperation {
-            targets: privileged,
+            targets: cli.targets.clone(),
             count: cli.count,
             interval_ns: duration_ns(cli.interval)?,
             timeout_ns: duration_ns(cli.timeout)?,
@@ -262,6 +265,28 @@ mod macos {
             json: cli.json.is_some(),
             json_file: cli.json.as_ref().is_some_and(Option::is_some),
         })))
+    }
+
+    fn protocol_needs_helper(protocol: &crate::cli::Protocol, unprivileged_icmp: bool) -> bool {
+        match protocol {
+            crate::cli::Protocol::Icmp => !unprivileged_icmp,
+            crate::cli::Protocol::Tcp(_) | crate::cli::Protocol::Udp(_) => true,
+            crate::cli::Protocol::Http(_) => false,
+        }
+    }
+
+    fn can_use_unprivileged_icmp(cli: &Cli) -> bool {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let v4 = || Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
+        let v6 = || Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6)).is_ok();
+        if cli.ipv4 {
+            v4()
+        } else if cli.ipv6 {
+            v6()
+        } else {
+            v4() && v6()
+        }
     }
 
     fn duration_ns(duration: Duration) -> Result<u64> {
@@ -1165,6 +1190,31 @@ mod macos {
             }
         }
 
+        fn cli_with_targets(targets: &[&str]) -> Cli {
+            Cli {
+                targets: targets.iter().map(|target| (*target).to_string()).collect(),
+                count: Some(1),
+                interval: Duration::from_secs(1),
+                timeout: Duration::from_secs(1),
+                deadline: None,
+                ttl: 64,
+                size: 56,
+                quiet: false,
+                interface: None,
+                ipv4: false,
+                ipv6: false,
+                tcp: false,
+                udp: false,
+                http: false,
+                headers: Vec::new(),
+                geo: false,
+                fetch_geo: false,
+                json: None,
+                traceroute: false,
+                max_hops: 64,
+            }
+        }
+
         #[test]
         fn launchd_plist_uses_the_activation_socket() {
             let plist = launchd_plist().unwrap();
@@ -1211,6 +1261,33 @@ mod macos {
                 ping.targets = vec!["https://example.com".to_string()];
             }
             assert!(validate_operation(&operation).is_err());
+        }
+
+        #[test]
+        fn helper_routes_only_privileged_ping_modes() {
+            use crate::cli::Protocol;
+
+            assert!(!protocol_needs_helper(&Protocol::Icmp, true));
+            assert!(protocol_needs_helper(&Protocol::Icmp, false));
+            assert!(protocol_needs_helper(&Protocol::Tcp(443), true));
+            assert!(protocol_needs_helper(&Protocol::Udp(33434), true));
+            assert!(!protocol_needs_helper(
+                &Protocol::Http("https://example.com".to_string()),
+                false
+            ));
+        }
+
+        #[test]
+        fn helper_request_keeps_mixed_non_http_targets_together() {
+            let cli = cli_with_targets(&["127.0.0.1", "127.0.0.1:1"]);
+            let operation = operation_from_cli(&cli).unwrap().unwrap();
+            let Operation::Ping(ping) = operation else {
+                panic!("expected ping operation")
+            };
+            assert_eq!(ping.targets, cli.targets);
+
+            let cli = cli_with_targets(&["127.0.0.1:1", "https://example.com"]);
+            assert!(operation_from_cli(&cli).is_err());
         }
 
         #[tokio::test]

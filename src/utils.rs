@@ -400,11 +400,25 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
-    use socket2::{Domain, Socket, Type};
+    use socket2::{Domain, Protocol, Socket, Type};
 
     let Some(protocol) = raw_protocol_for_cli(cli)? else {
         return Ok(());
     };
+    if protocol == Protocol::ICMPV4 && !cli.traceroute {
+        let v4 = || Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok();
+        let v6 = || Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6)).is_ok();
+        let available = if cli.ipv4 {
+            v4()
+        } else if cli.ipv6 {
+            v6()
+        } else {
+            v4() && v6()
+        };
+        if available {
+            return Ok(());
+        }
+    }
     let domain = if cli.ipv6 { Domain::IPV6 } else { Domain::IPV4 };
     match Socket::new(domain, Type::RAW, Some(protocol)) {
         Ok(_) => Ok(()),
