@@ -878,7 +878,7 @@ mod macos {
         );
         match request.action {
             Action::Status => {
-                write_frame(
+                write_response(
                     &mut writer,
                     &Response {
                         protocol_version: PROTOCOL_VERSION,
@@ -901,7 +901,7 @@ mod macos {
                         result: ResponseResult::Error(format!("{error:#}")),
                     },
                 };
-                write_frame(&mut writer, &response).await
+                write_response(&mut writer, &response).await
             }
         }
     }
@@ -972,7 +972,7 @@ mod macos {
                     match output {
                         Some(output) => {
                             let (stream, data) = output?;
-                            write_frame(
+                            write_response(
                                 writer,
                                 &Response {
                                     protocol_version: PROTOCOL_VERSION,
@@ -1074,8 +1074,23 @@ mod macos {
         writer: &mut tokio::net::unix::OwnedWriteHalf,
         value: &T,
     ) -> Result<()> {
+        write_frame_with_limit(writer, value, MAX_REQUEST).await
+    }
+
+    async fn write_response<T: Serialize>(
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        value: &T,
+    ) -> Result<()> {
+        write_frame_with_limit(writer, value, MAX_RESPONSE).await
+    }
+
+    async fn write_frame_with_limit<T: Serialize>(
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        value: &T,
+        max: usize,
+    ) -> Result<()> {
         let data = serde_json::to_vec(value)?;
-        anyhow::ensure!(data.len() <= MAX_REQUEST, "helper frame is too large");
+        anyhow::ensure!(data.len() <= max, "helper frame is too large");
         writer.write_all(&data).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
@@ -1337,6 +1352,29 @@ mod macos {
             let (reader, _) = server.into_split();
             let mut reader = BufReader::new(reader);
             assert!(read_frame::<ClientControl>(&mut reader, 4).await.is_err());
+        }
+
+        #[tokio::test]
+        async fn helper_responses_use_the_response_frame_limit() {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: ResponseResult::Output {
+                    stream: OutputStream::Stdout,
+                    data: "x".repeat(MAX_REQUEST),
+                },
+            };
+            let task = tokio::spawn(async move {
+                let mut writer = server.into_split().1;
+                write_response(&mut writer, &response).await
+            });
+            let mut line = String::new();
+            BufReader::new(&mut client)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            assert!(line.len() > MAX_REQUEST);
+            task.await.unwrap().unwrap();
         }
 
         #[tokio::test]
