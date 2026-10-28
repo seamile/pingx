@@ -774,19 +774,7 @@ mod platform {
             sequence: u32,
         ) -> io::Result<()> {
             let source = crate::probe::tcp_syn::local_address_for(target)?;
-            let packet = crate::probe::tcp_syn::build_tcp_packet(
-                source,
-                target,
-                crate::probe::tcp_syn::TcpSegment {
-                    source_port: remote_port,
-                    target_port: local_port,
-                    sequence,
-                    acknowledgement: 0,
-                    flags: TCP_RST,
-                    payload: &[],
-                },
-                64,
-            )?;
+            let packet = build_tcp_reset_packet(source, target, local_port, remote_port, sequence)?;
             let packet = crate::probe::tcp_syn::raw_tcp_payload(&packet, target)?;
             loop {
                 let mut guard = self.send.writable().await?;
@@ -1061,19 +1049,8 @@ mod platform {
             remote_port: u16,
             sequence: u32,
         ) -> io::Result<()> {
-            let packet = crate::probe::tcp_syn::build_tcp_packet(
-                self.local,
-                target,
-                crate::probe::tcp_syn::TcpSegment {
-                    source_port: remote_port,
-                    target_port: local_port,
-                    sequence,
-                    acknowledgement: 0,
-                    flags: TCP_RST,
-                    payload: &[],
-                },
-                64,
-            )?;
+            let packet =
+                build_tcp_reset_packet(self.local, target, local_port, remote_port, sequence)?;
             let WindowsSend::Injector(injector) = &self.send else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1236,6 +1213,28 @@ mod platform {
                 payload,
             },
             ttl,
+        )
+    }
+
+    fn build_tcp_reset_packet(
+        source: IpAddr,
+        target: IpAddr,
+        local_port: u16,
+        remote_port: u16,
+        sequence: u32,
+    ) -> io::Result<Vec<u8>> {
+        crate::probe::tcp_syn::build_tcp_packet(
+            source,
+            target,
+            crate::probe::tcp_syn::TcpSegment {
+                source_port: local_port,
+                target_port: remote_port,
+                sequence,
+                acknowledgement: 0,
+                flags: TCP_RST,
+                payload: &[],
+            },
+            64,
         )
     }
 
@@ -3203,6 +3202,22 @@ mod platform {
             assert_eq!(ip_checksum(&packet[..20]), 0);
             #[cfg(target_os = "macos")]
             assert_eq!(&packet[10..12], &[0, 0]);
+        }
+
+        #[test]
+        fn tcp_reset_uses_the_probe_tuple_in_reverse_direction() {
+            let packet = build_tcp_reset_packet(
+                "192.0.2.1".parse().unwrap(),
+                "198.51.100.2".parse().unwrap(),
+                40000,
+                443,
+                0x1234_5678,
+            )
+            .unwrap();
+            assert_eq!(&packet[20..22], &40000u16.to_be_bytes());
+            assert_eq!(&packet[22..24], &443u16.to_be_bytes());
+            assert_eq!(&packet[24..28], &0x1234_5678u32.to_be_bytes());
+            assert_eq!(packet[33], TCP_RST);
         }
 
         #[test]
