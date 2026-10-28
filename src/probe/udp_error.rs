@@ -1,5 +1,7 @@
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+#[cfg(any(not(target_os = "linux"), test))]
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 const ICMP_DEST_UNREACH_V4: u8 = 3;
 const ICMP_TIME_EXCEEDED_V4: u8 = 11;
