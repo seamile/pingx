@@ -255,9 +255,15 @@ pub fn get_interface_ips(_iface: &str) -> Vec<IpAddr> {
 
 #[cfg(target_os = "linux")]
 pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
-    // Check if we need raw socket privileges by inspecting all targets
-    // If we have explicit ICMP flags, we definitely need raw socket.
-    let needs_raw_socket = if cli.ipv4 || cli.ipv6 {
+    use crate::cli::TraceProtocol;
+    if cli.traceroute {
+        let needs_raw_socket = cli.trace_target()?.1 != TraceProtocol::Udp;
+        if !needs_raw_socket {
+            return Ok(());
+        }
+    }
+    // Check whether any non-trace target needs ICMP and therefore a raw socket.
+    let needs_raw_socket = if cli.traceroute {
         true
     } else {
         // Iterate over targets to check if any requires ICMP
@@ -303,7 +309,7 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         false
     }
 
-    // Linux traceroute uses RAW sockets even when unprivileged ping is available.
+    // Linux ICMP/TCP traceroute uses RAW sockets even when unprivileged ping is available.
     if !cli.traceroute && Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok() {
         return Ok(());
     }
@@ -405,7 +411,7 @@ pub fn detect_protocol(
     target: &str,
 ) -> Result<(crate::cli::Protocol, String)> {
     // 1. Force Mode
-    if cli.ipv4 || cli.ipv6 {
+    if (cli.ipv4 || cli.ipv6) && !cli.tcp {
         return Ok((crate::cli::Protocol::Icmp, target.to_string()));
     }
     if cli.tcp {
@@ -662,6 +668,7 @@ mod tests {
             json: None,
             interface: None,
             traceroute: false,
+            trace_protocol: None,
             max_hops: 64,
         };
 
@@ -715,5 +722,14 @@ mod tests {
         assert_eq!(proto, crate::cli::Protocol::Icmp);
         assert_eq!(target, "google.com");
         cli.ipv4 = false;
+        for flag in ["-4", "-6"] {
+            use clap::Parser;
+            let cli =
+                crate::cli::Cli::try_parse_from(["pingx", flag, "-T", "example.com:443"]).unwrap();
+            assert_eq!(
+                detect_protocol(&cli, "example.com:443").unwrap(),
+                (crate::cli::Protocol::Tcp(443), "example.com".to_string())
+            );
+        }
     }
 }

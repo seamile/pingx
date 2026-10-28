@@ -4,7 +4,7 @@ use std::time::Duration;
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "A versatile network diagnostic tool to replace system ping/ping6.", long_about = None)]
 pub struct Cli {
-    /// Targets. In traceroute mode: TARGET [PACKET_LEN].
+    /// Targets. In traceroute mode: HOST[:PORT] [PACKET_LEN]; use [IPv6]:PORT for IPv6 ports.
     #[arg(required_unless_present = "fetch_geo")]
     pub targets: Vec<String>,
 
@@ -67,7 +67,7 @@ pub struct Cli {
     #[arg(
         short = '4',
         group = "family",
-        conflicts_with_all = ["tcp", "http", "geo", "fetch_geo"]
+        conflicts_with_all = ["http", "geo", "fetch_geo"]
     )]
     pub ipv4: bool,
 
@@ -75,11 +75,11 @@ pub struct Cli {
     #[arg(
         short = '6',
         group = "family",
-        conflicts_with_all = ["tcp", "http", "geo", "fetch_geo"]
+        conflicts_with_all = ["http", "geo", "fetch_geo"]
     )]
     pub ipv6: bool,
 
-    /// Force TCP ping. Target must be in host:port format.
+    /// Force TCP ping. Without -R, target must be in host:port format; with -R, use TCP SYN traceroute.
     #[arg(long = "tcp", short = 'T', group = "mode")]
     pub tcp: bool,
 
@@ -113,7 +113,6 @@ pub struct Cli {
             "interval",
             "deadline",
             "ttl",
-            "tcp",
             "http",
             "headers",
             "geo",
@@ -122,6 +121,17 @@ pub struct Cli {
         ]
     )]
     pub traceroute: bool,
+
+    /// Traceroute probe protocol. Defaults to ICMP.
+    #[arg(
+        long = "trace-protocol",
+        value_enum,
+        requires = "traceroute",
+        conflicts_with = "tcp",
+        value_name = "PROTOCOL",
+        help_heading = "Traceroute options"
+    )]
+    pub trace_protocol: Option<TraceProtocol>,
 
     /// Maximum number of hops. Requires -R.
     #[arg(
@@ -132,6 +142,62 @@ pub struct Cli {
         help_heading = "Traceroute options"
     )]
     pub max_hops: u8,
+}
+
+impl Cli {
+    pub fn trace_target(&self) -> anyhow::Result<(&str, TraceProtocol, u16)> {
+        let input = self
+            .targets
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("traceroute requires a target"))?;
+        let (host, port) = if input.parse::<std::net::IpAddr>().is_ok() || !input.contains(':') {
+            (input.as_str(), None)
+        } else {
+            let (host, port) = input
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow::anyhow!("invalid traceroute target"))?;
+            let host = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
+            anyhow::ensure!(
+                !host.is_empty() && (!host.contains(':') || input.starts_with('[')),
+                "use HOST:PORT or [IPv6]:PORT"
+            );
+            if input.starts_with('[') {
+                host.parse::<std::net::Ipv6Addr>()
+                    .map_err(|_| anyhow::anyhow!("invalid bracketed IPv6 address"))?;
+            }
+            let port = port
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or_else(|| anyhow::anyhow!("traceroute port must be between 1 and 65535"))?;
+            (host, Some(port))
+        };
+        let protocol = if self.tcp {
+            TraceProtocol::Tcp
+        } else {
+            self.trace_protocol.unwrap_or(if port.is_some() {
+                TraceProtocol::Tcp
+            } else {
+                TraceProtocol::Icmp
+            })
+        };
+        anyhow::ensure!(
+            protocol != TraceProtocol::Icmp || port.is_none(),
+            "ICMP traceroute does not use a port"
+        );
+        Ok((
+            host,
+            protocol,
+            port.unwrap_or(if protocol == TraceProtocol::Tcp {
+                80
+            } else {
+                33434
+            }),
+        ))
+    }
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -172,6 +238,78 @@ mod tests {
     }
 
     #[test]
+    fn traceroute_selects_probe_protocol_independently_from_tcp_ping() {
+        assert_eq!(
+            parse(&["-R", "--trace-protocol", "udp", "example.com"])
+                .unwrap()
+                .trace_protocol,
+            Some(TraceProtocol::Udp)
+        );
+        assert_eq!(
+            parse(&["-R", "-T", "example.com"]).unwrap().trace_protocol,
+            None
+        );
+        assert_eq!(
+            parse(&["-T", "example.com:443"]).unwrap().trace_protocol,
+            None
+        );
+        assert!(parse(&["-R", "-T", "--trace-protocol", "udp", "example.com"]).is_err());
+        assert!(parse(&["-R", "--trace-port", "443", "example.com"]).is_err());
+    }
+
+    #[test]
+    fn traceroute_ports_follow_target_syntax() {
+        for (args, expected) in [
+            (
+                vec!["-R", "1.1.1.1"],
+                ("1.1.1.1", TraceProtocol::Icmp, 33434),
+            ),
+            (
+                vec!["-R", "example.com:443"],
+                ("example.com", TraceProtocol::Tcp, 443),
+            ),
+            (
+                vec!["-R", "-T", "1.1.1.1:443"],
+                ("1.1.1.1", TraceProtocol::Tcp, 443),
+            ),
+            (
+                vec!["-R", "--trace-protocol", "udp", "1.1.1.1:33450"],
+                ("1.1.1.1", TraceProtocol::Udp, 33450),
+            ),
+            (
+                vec!["-R", "--trace-protocol", "udp", "[::1]:33450"],
+                ("::1", TraceProtocol::Udp, 33450),
+            ),
+            (vec!["-R", "::1"], ("::1", TraceProtocol::Icmp, 33434)),
+            (
+                vec!["-R", "-T", "example.com"],
+                ("example.com", TraceProtocol::Tcp, 80),
+            ),
+        ] {
+            assert_eq!(parse(&args).unwrap().trace_target().unwrap(), expected);
+        }
+        for input in [
+            "host:0",
+            "host:65536",
+            "host:abc",
+            ":443",
+            "[invalid]:443",
+            "[::1:443",
+        ] {
+            assert!(
+                parse(&["-R", input]).unwrap().trace_target().is_err(),
+                "{input}"
+            );
+        }
+        assert!(
+            parse(&["-R", "--trace-protocol", "icmp", "host:443"])
+                .unwrap()
+                .trace_target()
+                .is_err()
+        );
+    }
+
+    #[test]
     fn traceroute_rejects_unrelated_modes_and_flags() {
         for args in [
             vec!["-R", "--json", "example.com"],
@@ -184,8 +322,10 @@ mod tests {
     }
 
     #[test]
-    fn family_flags_keep_legacy_protocol_conflicts() {
-        assert!(parse(&["-4", "-T", "example.com:443"]).is_err());
+    fn family_flags_allow_tcp_and_keep_unrelated_conflicts() {
+        assert!(parse(&["-4", "-T", "example.com:443"]).is_ok());
+        assert!(parse(&["-6", "-T", "[::1]:443"]).is_ok());
+        assert!(parse(&["-R", "-4", "-T", "example.com"]).is_ok());
         assert!(parse(&["-6", "-H", "example.com"]).is_err());
     }
 
@@ -216,4 +356,18 @@ pub enum Protocol {
     Icmp,
     Tcp(u16),
     Http(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum TraceProtocol {
+    Udp,
+    #[default]
+    Icmp,
+    Tcp,
+}
+
+impl From<Option<TraceProtocol>> for TraceProtocol {
+    fn from(value: Option<TraceProtocol>) -> Self {
+        value.unwrap_or(TraceProtocol::Icmp)
+    }
 }

@@ -25,12 +25,15 @@ async fn run_trace(_cli: Cli) -> Result<()> {
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use crate::cli::TraceProtocol;
     use crate::geoip::GeoIpManager;
     use crate::pinger::icmp_packet::IcmpPacket;
     use crate::utils::{IpVersion, resolve_host};
     use async_trait::async_trait;
     use colored::Colorize;
     use socket2::{Domain, Protocol, Socket, Type};
+    #[cfg(target_os = "linux")]
+    use socket2::{SockAddr, SockAddrStorage};
     use std::collections::{BTreeMap, HashMap};
     use std::io;
     use std::net::{IpAddr, SocketAddr};
@@ -50,6 +53,7 @@ mod unix {
     const ICMP_DEST_UNREACH_V4: u8 = 3;
     const ICMP_DEST_UNREACH_V6: u8 = 1;
     const IDENTIFIER: u16 = 0x5047;
+    const TCP_SOURCE_PORT_BASE: u16 = 33434;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ReplyKind {
@@ -61,14 +65,25 @@ mod unix {
     #[derive(Clone, Copy, Debug)]
     struct Reply {
         sequence: u16,
+        token: u16,
+        destination: Option<SocketAddr>,
         ip: IpAddr,
         kind: ReplyKind,
         received_at: Instant,
     }
 
+    #[cfg(target_os = "linux")]
+    struct ErrorQueueReply {
+        from: IpAddr,
+        kind: u8,
+        code: u8,
+        destination: Option<SocketAddr>,
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct Probe {
         ttl: u8,
+        token: u16,
         started: Instant,
         deadline: Instant,
         reply: Option<(IpAddr, Duration, ReplyKind)>,
@@ -95,13 +110,30 @@ mod unix {
         max_sent: u8,
     }
 
+    struct ProbeRequest {
+        target: IpAddr,
+        ident: u16,
+        protocol: TraceProtocol,
+        base_port: u16,
+        payload_size: usize,
+        max_hops: u8,
+        timeout: Duration,
+    }
+
     #[async_trait]
     trait ProbeSender {
-        async fn send_probe(&self, data: Vec<u8>, target: IpAddr, ttl: u8) -> io::Result<()>;
+        async fn send_probe(&self, probe: ProbePacket, target: IpAddr, ttl: u8) -> io::Result<()>;
+    }
+
+    #[derive(Clone, Debug)]
+    enum ProbePacket {
+        Icmp(Vec<u8>),
+        Udp(Vec<u8>, u16),
+        Tcp(Vec<u8>, u16),
     }
 
     pub(super) async fn run_trace(cli: Cli) -> Result<()> {
-        let target_name = cli.targets[0].clone();
+        let (target_name, protocol, trace_port) = cli.trace_target()?;
         let version = if cli.ipv4 {
             IpVersion::V4
         } else if cli.ipv6 {
@@ -109,7 +141,7 @@ mod unix {
         } else {
             IpVersion::Any
         };
-        let addrs = resolve_host(&target_name, version).await?;
+        let addrs = resolve_host(target_name, version).await?;
         let target = select_target(addrs)?;
         let requested = cli
             .targets
@@ -117,31 +149,54 @@ mod unix {
             .map(|value| value.parse::<usize>())
             .transpose()
             .map_err(|_| anyhow::anyhow!("traceroute packet size must be an integer"))?;
-        let size = packet_size(target, requested)?;
         let max_hops = cli.max_hops;
         anyhow::ensure!(
             cli.timeout > Duration::ZERO,
             "traceroute timeout must be greater than zero"
         );
         let timeout = cli.timeout;
-        let socket = Arc::new(TraceSocket::new(target.is_ipv6())?);
+        anyhow::ensure!(
+            !(protocol == TraceProtocol::Tcp && target.is_ipv6()),
+            "TCP traceroute is currently supported for IPv4 only"
+        );
+        let size = packet_size(target, requested, protocol)?;
+        if protocol == TraceProtocol::Udp {
+            anyhow::ensure!(
+                u32::from(trace_port) + u32::from(max_hops) * PROBES_PER_HOP as u32
+                    <= u32::from(u16::MAX) + 1,
+                "UDP traceroute port range exceeds 65535"
+            );
+        }
+        let socket = Arc::new(TraceSocket::new(target.is_ipv6(), protocol, trace_port)?);
 
         println!(
             "{}",
-            styled_trace_header(&target_name, target, max_hops, size)
+            styled_trace_header(target_name, target, max_hops, size)
         );
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
         let receiver = spawn_receiver(socket.clone(), target, reply_tx);
         let ident = trace_ident();
-        let payload_size = size - if target.is_ipv4() { 28 } else { 48 };
+        let probe_overhead = match protocol {
+            TraceProtocol::Icmp => 8,
+            TraceProtocol::Udp => 8,
+            TraceProtocol::Tcp => 20,
+        };
+        let payload_size = size
+            .checked_sub(if target.is_ipv4() { 20 } else { 40 })
+            .and_then(|value| value.checked_sub(probe_overhead))
+            .ok_or_else(|| anyhow::anyhow!("traceroute packet size is too small"))?;
         let result = run_probes(
             socket.as_ref(),
-            target,
-            ident,
-            payload_size,
-            max_hops,
-            timeout,
+            ProbeRequest {
+                target,
+                ident,
+                protocol,
+                base_port: trace_port,
+                payload_size,
+                max_hops,
+                timeout,
+            },
             &mut reply_rx,
         )
         .await;
@@ -161,21 +216,27 @@ mod unix {
 
     async fn run_probes(
         sender: &dyn ProbeSender,
-        target: IpAddr,
-        ident: u16,
-        payload_size: usize,
-        max_hops: u8,
-        timeout: Duration,
+        request: ProbeRequest,
         reply_rx: &mut mpsc::Receiver<Reply>,
     ) -> Result<ProbeRun> {
+        let ProbeRequest {
+            target,
+            ident,
+            protocol,
+            base_port,
+            payload_size,
+            max_hops,
+            timeout,
+        } = request;
         let mut probes = HashMap::<u16, Probe>::new();
         let mut sequence = 1u16;
         let mut next_ttl = 1u16;
-        let mut stop_hop = None::<u8>;
+        let mut stop_hops = BTreeMap::<u8, ReplyKind>::new();
         let mut terminal_error = None::<u8>;
 
         loop {
             let now = Instant::now();
+            let stop_hop = stop_hops.keys().next().copied();
             while can_send(
                 next_ttl,
                 max_hops,
@@ -185,23 +246,36 @@ mod unix {
                 let ttl = u8::try_from(next_ttl).expect("max-hops is limited to u8");
                 for _ in 0..PROBES_PER_HOP {
                     let seq = next_sequence(&mut sequence, &probes);
-                    let packet = IcmpPacket::new_request(
-                        target.is_ipv6(),
-                        ident,
-                        seq,
-                        vec![0; payload_size],
-                    );
+                    let token = port_for(seq, protocol, base_port);
+                    let packet = match protocol {
+                        TraceProtocol::Icmp => ProbePacket::Icmp(
+                            IcmpPacket::new_request(
+                                target.is_ipv6(),
+                                ident,
+                                token,
+                                vec![0; payload_size],
+                            )
+                            .encode(),
+                        ),
+                        TraceProtocol::Udp => {
+                            let mut payload = vec![0; payload_size.max(4)];
+                            payload[..4].copy_from_slice(&udp_probe_marker(ident, token));
+                            ProbePacket::Udp(payload, token)
+                        }
+                        TraceProtocol::Tcp => ProbePacket::Tcp(vec![0; payload_size], token),
+                    };
                     probes.insert(
                         seq,
                         Probe {
                             ttl,
+                            token,
                             started: Instant::now(),
                             deadline: Instant::now(),
                             reply: None,
                             cancelled: false,
                         },
                     );
-                    sender.send_probe(packet.encode(), target, ttl).await?;
+                    sender.send_probe(packet, target, ttl).await?;
                     let sent_at = Instant::now();
                     let deadline = sent_at
                         .checked_add(timeout)
@@ -235,20 +309,31 @@ mod unix {
             tokio::select! {
                 reply = reply_rx.recv() => {
                     if let Some(reply) = reply
-                        && let Some(probe) = probes.get_mut(&reply.sequence)
-                        && !probe.cancelled
-                        && probe.reply.is_none()
+                        && let Some(probe) = probes.values_mut().find(|probe| {
+                            let token_matches = if protocol == TraceProtocol::Icmp {
+                                probe.token == reply.sequence
+                            } else {
+                                probe.token == reply.token
+                            };
+                            token_matches
+                                && (protocol != TraceProtocol::Udp
+                                    || reply.destination.is_none_or(|destination| {
+                                        probe.token == destination.port()
+                                    }))
+                                && reply.received_at <= probe.deadline
+                                && !probe.cancelled
+                                && probe.reply.is_none()
+                        })
                     {
                         let reply_ttl = probe.ttl;
                         let rtt = reply_rtt(probe.started, reply);
                         probe.reply = Some((reply.ip, rtt, reply.kind));
                         if reply.kind == ReplyKind::Reached {
-                            stop_hop =
-                                Some(stop_hop.map_or(reply_ttl, |hop: u8| hop.min(reply_ttl)));
+                            stop_hops.entry(reply_ttl).or_insert(ReplyKind::Reached);
                             cancel_higher_ttls(&mut probes, reply_ttl);
                         } else if let ReplyKind::Unreachable(code) = reply.kind {
                             terminal_error = Some(code);
-                            stop_hop = Some(stop_hop.map_or(reply_ttl, |hop: u8| hop.min(reply_ttl)));
+                            stop_hops.entry(reply_ttl).or_insert(ReplyKind::Unreachable(code));
                             cancel_higher_ttls(&mut probes, reply_ttl);
                         }
                     }
@@ -260,7 +345,7 @@ mod unix {
         let max_sent = probes.values().map(|p| p.ttl).max().unwrap_or(0);
         Ok(ProbeRun {
             probes,
-            stop_hop,
+            stop_hop: stop_hops.keys().next().copied(),
             terminal_error,
             max_sent,
         })
@@ -307,9 +392,32 @@ mod unix {
         }
     }
 
-    fn packet_size(target: IpAddr, requested: Option<usize>) -> Result<usize> {
+    fn port_for(sequence: u16, protocol: TraceProtocol, base: u16) -> u16 {
+        match protocol {
+            TraceProtocol::Icmp => sequence,
+            TraceProtocol::Udp => base.wrapping_add(sequence - 1),
+            TraceProtocol::Tcp => {
+                let available = u16::MAX - TCP_SOURCE_PORT_BASE + 1;
+                let offset = (sequence - 1) % available;
+                TCP_SOURCE_PORT_BASE.wrapping_add(offset)
+            }
+        }
+    }
+
+    fn packet_size(
+        target: IpAddr,
+        requested: Option<usize>,
+        protocol: TraceProtocol,
+    ) -> Result<usize> {
         let size = requested.unwrap_or(if target.is_ipv4() { 40 } else { 60 });
-        let minimum = if target.is_ipv4() { 28 } else { 48 };
+        let minimum = match (target.is_ipv4(), protocol) {
+            (true, TraceProtocol::Tcp) => 40,
+            (true, TraceProtocol::Udp) => 32,
+            (true, TraceProtocol::Icmp) => 28,
+            (false, TraceProtocol::Udp) => 52,
+            (false, TraceProtocol::Icmp) => 48,
+            (false, TraceProtocol::Tcp) => unreachable!("TCP is rejected for IPv6"),
+        };
         anyhow::ensure!(
             (minimum..=u16::MAX as usize).contains(&size),
             "traceroute packet size must be between {} and 65535 bytes",
@@ -371,39 +479,114 @@ mod unix {
     }
 
     struct TraceSocket {
-        inner: AsyncFd<std::net::UdpSocket>,
+        send: AsyncFd<std::net::UdpSocket>,
+        recv: AsyncFd<std::net::UdpSocket>,
+        tcp_recv: Option<AsyncFd<std::net::UdpSocket>>,
         v6: bool,
+        protocol: TraceProtocol,
+        trace_port: u16,
     }
 
     impl TraceSocket {
-        fn new(v6: bool) -> io::Result<Self> {
-            let (domain, protocol) = if v6 {
-                (Domain::IPV6, Protocol::ICMPV6)
-            } else {
-                (Domain::IPV4, Protocol::ICMPV4)
+        fn new(v6: bool, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+            let send = match protocol {
+                TraceProtocol::Icmp => Self::icmp_socket(v6)?,
+                TraceProtocol::Udp => {
+                    let socket =
+                        Socket::new(domain(v6), Type::DGRAM, Some(socket2::Protocol::UDP))?;
+                    bind_device(&socket, v6)?;
+                    socket
+                }
+                TraceProtocol::Tcp => {
+                    if v6 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "TCP traceroute requires IPv4",
+                        ));
+                    }
+                    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(socket2::Protocol::TCP))
+                        .map_err(raw_error)?;
+                    bind_device(&socket, false)?;
+                    socket.set_header_included_v4(true)?;
+                    socket
+                }
             };
-            let socket = Socket::new(domain, socket_type(), Some(protocol)).map_err(|e| {
+            let recv = match protocol {
+                TraceProtocol::Udp => {
+                    #[cfg(target_os = "linux")]
+                    let socket = send.try_clone()?;
+                    #[cfg(not(target_os = "linux"))]
+                    let socket = Self::icmp_socket(v6)?;
+                    #[cfg(target_os = "linux")]
+                    {
+                        let on: libc::c_int = 1;
+                        let (level, option) = if v6 {
+                            (libc::IPPROTO_IPV6, libc::IPV6_RECVERR)
+                        } else {
+                            (libc::IPPROTO_IP, libc::IP_RECVERR)
+                        };
+                        let rc = unsafe {
+                            libc::setsockopt(
+                                socket.as_raw_fd(),
+                                level,
+                                option,
+                                &on as *const _ as *const libc::c_void,
+                                std::mem::size_of_val(&on) as libc::socklen_t,
+                            )
+                        };
+                        if rc != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                    }
+                    socket
+                }
+                TraceProtocol::Icmp => Self::icmp_socket(v6)?,
+                TraceProtocol::Tcp => Self::icmp_socket(v6)?,
+            };
+            let tcp_recv = if protocol == TraceProtocol::Tcp {
+                let socket = Socket::new(Domain::IPV4, Type::RAW, Some(socket2::Protocol::TCP))
+                    .map_err(raw_error)?;
+                bind_device(&socket, false)?;
+                socket.set_header_included_v4(true)?;
+                socket.set_nonblocking(true)?;
+                let socket: std::net::UdpSocket = socket.into();
+                Some(unsafe { AsyncFd::register(socket) }?)
+            } else {
+                None
+            };
+            send.set_nonblocking(true)?;
+            recv.set_nonblocking(true)?;
+            set_ttl_value(&send, v6, 1)?;
+            let send = std::net::UdpSocket::from(send);
+            let recv: std::net::UdpSocket = recv.into();
+            Ok(Self {
+                send: unsafe { AsyncFd::register(send) }?,
+                recv: unsafe { AsyncFd::register(recv) }?,
+                tcp_recv,
+                v6,
+                protocol,
+                trace_port,
+            })
+        }
+
+        fn icmp_socket(v6: bool) -> io::Result<Socket> {
+            let protocol = if v6 {
+                socket2::Protocol::ICMPV6
+            } else {
+                socket2::Protocol::ICMPV4
+            };
+            let socket = Socket::new(domain(v6), socket_type(), Some(protocol)).map_err(|e| {
                 if e.kind() == io::ErrorKind::PermissionDenied {
                     io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        "traceroute requires RAW ICMP privileges; run with sudo or grant CAP_NET_RAW",
+                        "traceroute requires RAW socket privileges; run with sudo or grant CAP_NET_RAW",
                     )
                 } else {
                     e
                 }
             })?;
-            if let Some(iface) = crate::utils::get_bind_interface() {
-                crate::utils::bind_socket_to_interface(&socket, iface, v6)?;
-            }
-            socket.set_nonblocking(true)?;
-            if v6 {
-                socket.set_unicast_hops_v6(1)?;
-            } else {
-                socket.set_ttl_v4(1)?;
-            }
-            let socket: std::net::UdpSocket = socket.into();
-            let inner = unsafe { AsyncFd::register(socket) }?;
-            Ok(Self { inner, v6 })
+            bind_device(&socket, v6)?;
+            Ok(socket)
         }
 
         fn set_ttl(&self, ttl: u8) -> io::Result<()> {
@@ -413,9 +596,10 @@ mod unix {
             } else {
                 (libc::IPPROTO_IP, libc::IP_TTL)
             };
+            let fd = self.send.get_ref().as_raw_fd();
             let rc = unsafe {
                 libc::setsockopt(
-                    self.inner.get_ref().as_raw_fd(),
+                    fd,
                     level,
                     option,
                     &value as *const _ as *const libc::c_void,
@@ -429,16 +613,49 @@ mod unix {
             }
         }
 
-        async fn send_to(&self, data: &[u8], target: IpAddr, ttl: u8) -> io::Result<()> {
+        async fn send_to(&self, probe: ProbePacket, target: IpAddr, ttl: u8) -> io::Result<()> {
             self.set_ttl(ttl)?;
+            let (data, port) = match (&self.protocol, probe) {
+                (TraceProtocol::Icmp, ProbePacket::Icmp(data)) => (data, 0),
+                (TraceProtocol::Udp, ProbePacket::Udp(data, port)) => (data, port),
+                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port)) => (
+                    build_tcp_packet(target, self.trace_port, source_port, &payload, ttl)?,
+                    0,
+                ),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "probe/protocol mismatch",
+                    ));
+                }
+            };
+            #[cfg(target_os = "linux")]
+            let mut udp_retries = 0;
             loop {
-                let mut guard = self.inner.writable().await?;
+                let mut guard = self.send.writable().await?;
                 match guard.try_io(|inner| {
+                    // ICMP errors belong to earlier UDP probes and remain in MSG_ERRQUEUE.
+                    #[cfg(target_os = "linux")]
+                    if self.protocol == TraceProtocol::Udp {
+                        inner.get_ref().take_error()?;
+                    }
                     inner
                         .get_ref()
-                        .send_to(data, SocketAddr::new(target, 0))
+                        .send_to(&data, SocketAddr::new(target, port))
                         .map(|_| ())
                 }) {
+                    #[cfg(target_os = "linux")]
+                    Ok(Err(error))
+                        if self.protocol == TraceProtocol::Udp
+                            && udp_retries < 3
+                            && matches!(
+                                error.raw_os_error(),
+                                Some(libc::EHOSTUNREACH | libc::ENETUNREACH | libc::ECONNREFUSED)
+                            ) =>
+                    {
+                        udp_retries += 1;
+                        tokio::task::yield_now().await;
+                    }
                     Ok(result) => return result,
                     Err(_) => continue,
                 }
@@ -447,7 +664,116 @@ mod unix {
 
         async fn recv(&self, data: &mut [u8]) -> io::Result<(usize, IpAddr)> {
             loop {
-                let mut guard = self.inner.readable().await?;
+                let mut guard = self.recv.readable().await?;
+                match guard.try_io(|inner| {
+                    inner
+                        .get_ref()
+                        .recv_from(data)
+                        .map(|(size, address)| (size, address.ip()))
+                }) {
+                    Ok(result) => return result,
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        async fn recv_error(
+            &self,
+            data: &mut [u8],
+        ) -> io::Result<(IpAddr, usize, u8, u8, Option<SocketAddr>)> {
+            loop {
+                let mut guard = self.recv.ready(tokio::io::Interest::ERROR).await?;
+                match guard.try_io(|inner| {
+                    let fd = inner.get_ref().as_raw_fd();
+                    let mut iov = libc::iovec {
+                        iov_base: data.as_mut_ptr().cast(),
+                        iov_len: data.len(),
+                    };
+                    let mut control = [0usize; 32];
+                    let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+                    msg.msg_name = (&mut name as *mut libc::sockaddr_storage).cast();
+                    msg.msg_namelen = std::mem::size_of_val(&name) as libc::socklen_t;
+                    msg.msg_iov = &mut iov;
+                    msg.msg_iovlen = 1;
+                    msg.msg_control = control.as_mut_ptr().cast();
+                    msg.msg_controllen = std::mem::size_of_val(&control);
+                    let size = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_ERRQUEUE) };
+                    if size < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let destination = socket_addr_from_storage(&name, msg.msg_namelen);
+                    let mut code = None;
+                    let mut offender = None;
+                    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+                    while !cmsg.is_null() {
+                        let header = unsafe { &*cmsg };
+                        if (header.cmsg_level == libc::IPPROTO_IP
+                            && header.cmsg_type == libc::IP_RECVERR)
+                            || (header.cmsg_level == libc::IPPROTO_IPV6
+                                && header.cmsg_type == libc::IPV6_RECVERR)
+                        {
+                            let error = unsafe {
+                                &*(libc::CMSG_DATA(cmsg) as *const libc::sock_extended_err)
+                            };
+                            if matches!(
+                                error.ee_origin,
+                                libc::SO_EE_ORIGIN_ICMP | libc::SO_EE_ORIGIN_ICMP6
+                            ) {
+                                let valid = (error.ee_origin == libc::SO_EE_ORIGIN_ICMP
+                                    && matches!(
+                                        error.ee_type,
+                                        ICMP_TIME_EXCEEDED_V4 | ICMP_DEST_UNREACH_V4
+                                    ))
+                                    || (error.ee_origin == libc::SO_EE_ORIGIN_ICMP6
+                                        && matches!(
+                                            error.ee_type,
+                                            ICMP_TIME_EXCEEDED_V6 | ICMP_DEST_UNREACH_V6
+                                        ));
+                                if valid {
+                                    code = Some((error.ee_type, error.ee_code));
+                                }
+                                let address = unsafe { libc::SO_EE_OFFENDER(error) };
+                                if !address.is_null() {
+                                    let len = match unsafe { (*address).sa_family } as i32 {
+                                        libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
+                                        libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
+                                        _ => 0,
+                                    };
+                                    if len > 0 {
+                                        let address = unsafe {
+                                            sockaddr_from_ptr(address, len as libc::socklen_t)
+                                        };
+                                        offender = address.as_socket().map(|address| address.ip());
+                                    }
+                                }
+                            }
+                        }
+                        cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+                    }
+                    match (code, offender) {
+                        (Some((kind, code)), Some(address)) => {
+                            Ok((address, size as usize, kind, code, destination))
+                        }
+                        _ => Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "ignore non-ICMP error",
+                        )),
+                    }
+                }) {
+                    Ok(result) => return result,
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        async fn recv_tcp(&self, data: &mut [u8]) -> io::Result<(usize, IpAddr)> {
+            let socket = self.tcp_recv.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "TCP receiver unavailable")
+            })?;
+            loop {
+                let mut guard = socket.readable().await?;
                 match guard.try_io(|inner| {
                     inner
                         .get_ref()
@@ -461,20 +787,166 @@ mod unix {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn socket_type() -> Type {
-        Type::DGRAM
-    }
-
-    #[cfg(not(target_os = "macos"))]
     fn socket_type() -> Type {
         Type::RAW
     }
 
     #[async_trait]
     impl ProbeSender for TraceSocket {
-        async fn send_probe(&self, data: Vec<u8>, target: IpAddr, ttl: u8) -> io::Result<()> {
-            self.send_to(&data, target, ttl).await
+        async fn send_probe(&self, probe: ProbePacket, target: IpAddr, ttl: u8) -> io::Result<()> {
+            self.send_to(probe, target, ttl).await
+        }
+    }
+
+    fn domain(v6: bool) -> Domain {
+        if v6 { Domain::IPV6 } else { Domain::IPV4 }
+    }
+
+    fn raw_error(error: io::Error) -> io::Error {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP traceroute requires RAW socket privileges; run with sudo or grant CAP_NET_RAW",
+            )
+        } else {
+            error
+        }
+    }
+
+    fn bind_device(socket: &Socket, v6: bool) -> io::Result<()> {
+        if let Some(iface) = crate::utils::get_bind_interface() {
+            crate::utils::bind_socket_to_interface(socket, iface, v6)?;
+        }
+        Ok(())
+    }
+
+    fn set_ttl_value(socket: &Socket, v6: bool, ttl: u8) -> io::Result<()> {
+        if v6 {
+            socket.set_unicast_hops_v6(u32::from(ttl))
+        } else {
+            socket.set_ttl_v4(u32::from(ttl))
+        }
+    }
+
+    fn build_tcp_packet(
+        target: IpAddr,
+        port: u16,
+        source_port: u16,
+        payload: &[u8],
+        ttl: u8,
+    ) -> io::Result<Vec<u8>> {
+        let mut packet = vec![0u8; 40 + payload.len()];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&((40 + payload.len()) as u16).to_be_bytes());
+        packet[6] = 0x40;
+        packet[8] = ttl;
+        packet[9] = 6;
+        let source =
+            match crate::utils::get_bind_interface() {
+                Some(iface) => crate::utils::get_interface_ips(iface)
+                    .into_iter()
+                    .find_map(|ip| match ip {
+                        IpAddr::V4(ip) => Some(ip),
+                        IpAddr::V6(_) => None,
+                    }),
+                None => local_ipv4_for(target),
+            }
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "TCP traceroute requires IPv4 in this version",
+                )
+            })?;
+        packet[12..16].copy_from_slice(&source.octets());
+        let target_ip = match target {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "TCP traceroute requires IPv4",
+                ));
+            }
+        };
+        packet[16..20].copy_from_slice(&target_ip.octets());
+        let header_sum = ip_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&header_sum.to_be_bytes());
+        let tcp = &mut packet[20..];
+        tcp[0..2].copy_from_slice(&source_port.to_be_bytes());
+        tcp[2..4].copy_from_slice(&port.to_be_bytes());
+        tcp[12] = 0x50;
+        tcp[13] = 0x02;
+        tcp[14..16].copy_from_slice(&65535u16.to_be_bytes());
+        tcp[20..].copy_from_slice(payload);
+        let checksum = tcp_checksum(source, tcp, &target_ip.octets());
+        tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
+        // Darwin's IP_HDRINCL expects length and fragment offset in host order.
+        #[cfg(target_os = "macos")]
+        {
+            packet[2..4].copy_from_slice(&((40 + payload.len()) as u16).to_ne_bytes());
+            packet[6..8].copy_from_slice(&0x4000u16.to_ne_bytes());
+            packet[10..12].fill(0);
+        }
+        Ok(packet)
+    }
+
+    fn ip_checksum(header: &[u8]) -> u16 {
+        finish_checksum(header.chunks(2).fold(0u32, |sum, word| {
+            sum + u16::from_be_bytes([word[0], *word.get(1).unwrap_or(&0)]) as u32
+        }))
+    }
+
+    fn tcp_checksum(source: std::net::Ipv4Addr, tcp: &[u8], target_octets: &[u8]) -> u16 {
+        let source_octets = source.octets();
+        let mut sum = source_octets
+            .chunks(2)
+            .chain(target_octets.chunks(2))
+            .fold(0u32, |sum, word| {
+                sum + u16::from_be_bytes([word[0], word[1]]) as u32
+            });
+        sum += 6u32 + tcp.len() as u32;
+        sum += tcp.chunks(2).fold(0u32, |sum, word| {
+            sum + u16::from_be_bytes([word[0], *word.get(1).unwrap_or(&0)]) as u32
+        });
+        finish_checksum(sum)
+    }
+
+    fn udp_probe_marker(ident: u16, port: u16) -> [u8; 4] {
+        let marker = (u32::from(ident) << 16) | u32::from(port);
+        marker.to_be_bytes()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn socket_addr_from_storage(
+        storage: &libc::sockaddr_storage,
+        len: libc::socklen_t,
+    ) -> Option<SocketAddr> {
+        (len > 0)
+            .then(|| unsafe {
+                sockaddr_from_ptr((storage as *const libc::sockaddr_storage).cast(), len)
+            })
+            .and_then(|address| address.as_socket())
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe fn sockaddr_from_ptr(address: *const libc::sockaddr, len: libc::socklen_t) -> SockAddr {
+        let storage: SockAddrStorage = unsafe { std::ptr::read_unaligned(address.cast()) };
+        unsafe { SockAddr::new(storage, len) }
+    }
+
+    fn finish_checksum(sum: u32) -> u16 {
+        let mut sum = (sum & 0xffff) + (sum >> 16);
+        sum = (sum & 0xffff) + (sum >> 16);
+        !(sum as u16)
+    }
+
+    fn local_ipv4_for(target: IpAddr) -> Option<std::net::Ipv4Addr> {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(socket2::Protocol::UDP)).ok()?;
+        socket
+            .connect(&socket2::SockAddr::from(SocketAddr::new(target, 33434)))
+            .ok()?;
+        match socket.local_addr().ok()?.as_socket()? {
+            SocketAddr::V4(addr) => Some(*addr.ip()),
+            SocketAddr::V6(_) => None,
         }
     }
 
@@ -484,12 +956,91 @@ mod unix {
         tx: mpsc::Sender<Reply>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut data = [0u8; 65535];
+            let mut icmp_data = [0u8; 65535];
+            let mut tcp_data = [0u8; 65535];
             loop {
-                match socket.recv(&mut data).await {
-                    Ok((size, from)) => {
+                #[cfg(target_os = "linux")]
+                let received = if socket.protocol == TraceProtocol::Udp {
+                    socket.recv_error(&mut icmp_data).await.map(
+                        |(from, size, kind, code, destination)| {
+                            (
+                                size,
+                                from,
+                                icmp_data[..size].to_vec(),
+                                Some((kind, code)),
+                                destination,
+                            )
+                        },
+                    )
+                } else if socket.tcp_recv.is_some() {
+                    tokio::select! {
+                        result = socket.recv(&mut icmp_data) => result.map(|(size, from)| (size, from, icmp_data[..size].to_vec(), None::<(u8, u8)>, None::<SocketAddr>)),
+                        result = socket.recv_tcp(&mut tcp_data) => result.map(|(size, from)| (size, from, tcp_data[..size].to_vec(), None::<(u8, u8)>, None::<SocketAddr>)),
+                    }
+                } else {
+                    socket.recv(&mut icmp_data).await.map(|(size, from)| {
+                        (
+                            size,
+                            from,
+                            icmp_data[..size].to_vec(),
+                            None::<(u8, u8)>,
+                            None::<SocketAddr>,
+                        )
+                    })
+                };
+                #[cfg(not(target_os = "linux"))]
+                let received = if socket.tcp_recv.is_some() {
+                    tokio::select! {
+                        result = socket.recv(&mut icmp_data) => result.map(|(size, from)| (size, from, icmp_data[..size].to_vec(), None::<(u8, u8)>, None::<SocketAddr>)),
+                        result = socket.recv_tcp(&mut tcp_data) => result.map(|(size, from)| (size, from, tcp_data[..size].to_vec(), None::<(u8, u8)>, None::<SocketAddr>)),
+                    }
+                } else {
+                    socket.recv(&mut icmp_data).await.map(|(size, from)| {
+                        (
+                            size,
+                            from,
+                            icmp_data[..size].to_vec(),
+                            None::<(u8, u8)>,
+                            None::<SocketAddr>,
+                        )
+                    })
+                };
+                match received {
+                    Ok((_, from, data, _error, _destination)) => {
                         let received_at = Instant::now();
-                        if let Some(reply) = parse_reply(&data[..size], from, target, received_at)
+                        #[cfg(target_os = "linux")]
+                        let reply = if let Some((kind, code)) = _error {
+                            parse_udp_error(
+                                &data,
+                                trace_ident(),
+                                ErrorQueueReply {
+                                    from,
+                                    kind,
+                                    code,
+                                    destination: _destination,
+                                },
+                                target,
+                            )
+                        } else {
+                            parse_reply(
+                                &data,
+                                from,
+                                target,
+                                socket.protocol,
+                                socket.trace_port,
+                                received_at,
+                            )
+                        };
+                        #[cfg(not(target_os = "linux"))]
+                        let reply = parse_reply(
+                            &data,
+                            from,
+                            target,
+                            socket.protocol,
+                            socket.trace_port,
+                            received_at,
+                        );
+                        if let Some(reply) = reply
                             && tx.send(reply).await.is_err()
                         {
                             break;
@@ -538,6 +1089,9 @@ mod unix {
     }
 
     fn location_for(geo: Option<&GeoIpManager>, ip: IpAddr) -> String {
+        if is_internal_ip(ip) {
+            return "Internal node".to_string();
+        }
         geo.and_then(|geo| geo.lookup(ip))
             .map(|record| {
                 [record.city, record.region, record.country]
@@ -550,16 +1104,47 @@ mod unix {
             .unwrap_or_else(|| "-".to_string())
     }
 
+    fn is_internal_ip(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => {
+                let [a, b, ..] = ip.octets();
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || a == 0
+                    || (a == 172 && (16..=31).contains(&b))
+            }
+            IpAddr::V6(ip) => {
+                let [first, ..] = ip.segments();
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (first & 0xfe00) == 0xfc00
+                    || (first & 0xffc0) == 0xfe80
+            }
+        }
+    }
+
     fn parse_reply(
         data: &[u8],
         from: IpAddr,
         target: IpAddr,
+        protocol: TraceProtocol,
+        trace_port: u16,
         received_at: Instant,
     ) -> Option<Reply> {
-        if target.is_ipv6() {
-            parse_reply_v6(data, from, target, received_at)
-        } else {
-            parse_reply_v4(data, from, target, received_at)
+        match protocol {
+            TraceProtocol::Icmp if target.is_ipv6() => {
+                parse_reply_v6(data, from, target, received_at)
+            }
+            TraceProtocol::Icmp => parse_reply_v4(data, from, target, received_at),
+            TraceProtocol::Udp => {
+                if target.is_ipv4() {
+                    parse_icmp_probe_reply_v4(data, from, target, 17, trace_port, received_at)
+                } else {
+                    parse_icmp_probe_reply_v6(data, from, target, 17, trace_port, received_at)
+                }
+            }
+            TraceProtocol::Tcp => parse_tcp_reply_v4(data, from, target, trace_port, received_at),
         }
     }
 
@@ -569,7 +1154,11 @@ mod unix {
         target: IpAddr,
         received_at: Instant,
     ) -> Option<Reply> {
-        let (icmp, _) = strip_ipv4(data)?;
+        let (icmp, icmp_offset) = strip_ipv4(data)?;
+        const IPPROTO_ICMP: u8 = 1;
+        if icmp_offset > 0 && data[9] != IPPROTO_ICMP {
+            return None;
+        }
         let packet = IcmpPacket::decode(icmp).ok()?;
         let kind = match packet.message_type {
             0 if from == target => ReplyKind::Reached,
@@ -587,6 +1176,12 @@ mod unix {
         };
         Some(Reply {
             sequence,
+            token: if kind == ReplyKind::Hop {
+                embedded_token_v4(icmp)?
+            } else {
+                packet.identifier
+            },
+            destination: None,
             ip: from,
             kind,
             received_at,
@@ -616,6 +1211,8 @@ mod unix {
         };
         Some(Reply {
             sequence,
+            token: packet.identifier,
+            destination: None,
             ip: from,
             kind,
             received_at,
@@ -627,9 +1224,207 @@ mod unix {
             let ihl = (data[0] & 0x0f) as usize * 4;
             return (ihl >= 20 && data.len() >= ihl).then_some((&data[ihl..], ihl));
         }
-        // DGRAM ICMP sockets may return the ICMP message without an IPv4 header.
+        // Some raw/DGRAM ICMP reads omit the outer IPv4 header.
         (data.len() >= 8 && matches!(data[0], 0 | ICMP_TIME_EXCEEDED_V4 | ICMP_DEST_UNREACH_V4))
             .then_some((data, 0))
+    }
+
+    fn embedded_token_v4(icmp: &[u8]) -> Option<u16> {
+        if icmp.len() < 8 + 20 {
+            return None;
+        }
+        let embedded = &icmp[8..];
+        let (inner, _) = strip_ipv4(embedded)?;
+        match embedded[9] {
+            1 => inner
+                .get(4..6)
+                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+            17 | 6 => inner
+                .get(0..2)
+                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+            _ => None,
+        }
+    }
+
+    fn parse_tcp_reply_v4(
+        data: &[u8],
+        from: IpAddr,
+        target: IpAddr,
+        trace_port: u16,
+        received_at: Instant,
+    ) -> Option<Reply> {
+        if data.len() >= 40 && data[0] >> 4 == 4 && data[9] == 6 {
+            let ihl = usize::from(data[0] & 0x0f) * 4;
+            if ihl < 20 {
+                return None;
+            }
+            let tcp = data.get(ihl..)?;
+            if tcp.len() >= 20
+                && from == target
+                && u16::from_be_bytes([tcp[0], tcp[1]]) == trace_port
+                && (tcp[13] & 0x04 != 0 || tcp[13] & 0x12 == 0x12)
+            {
+                return Some(Reply {
+                    sequence: 0,
+                    token: u16::from_be_bytes([tcp[2], tcp[3]]),
+                    destination: None,
+                    ip: from,
+                    kind: ReplyKind::Reached,
+                    received_at,
+                });
+            }
+        }
+        parse_icmp_probe_reply_v4(data, from, target, 6, trace_port, received_at)
+    }
+
+    fn parse_icmp_probe_reply_v4(
+        data: &[u8],
+        from: IpAddr,
+        target: IpAddr,
+        protocol: u8,
+        trace_port: u16,
+        received_at: Instant,
+    ) -> Option<Reply> {
+        let (icmp, offset) = strip_ipv4(data)?;
+        if offset > 0 && data[9] != 1 {
+            return None;
+        }
+        if icmp.len() < 8 + 20 || !matches!(icmp[0], ICMP_TIME_EXCEEDED_V4 | ICMP_DEST_UNREACH_V4) {
+            return None;
+        }
+        let embedded = &icmp[8..];
+        let IpAddr::V4(target_ip) = target else {
+            return None;
+        };
+        if embedded[9] != protocol || embedded[16..20] != target_ip.octets() {
+            return None;
+        }
+        let inner_ihl = (embedded[0] & 0x0f) as usize * 4;
+        let inner_total = u16::from_be_bytes([embedded[2], embedded[3]]) as usize;
+        let inner_minimum = inner_ihl + if protocol == 6 { 20 } else { 8 };
+        if embedded[0] >> 4 != 4
+            || inner_ihl < 20
+            || inner_total < inner_minimum
+            || embedded.len() < inner_ihl + 8
+        {
+            return None;
+        }
+        let l4 = &embedded[inner_ihl..];
+        let token = match protocol {
+            17 if u16::from_be_bytes([l4[2], l4[3]]) >= trace_port => {
+                u16::from_be_bytes([l4[2], l4[3]])
+            }
+            6 if u16::from_be_bytes([l4[2], l4[3]]) == trace_port => {
+                u16::from_be_bytes([l4[0], l4[1]])
+            }
+            _ => return None,
+        };
+        let kind = match icmp[0] {
+            ICMP_TIME_EXCEEDED_V4 if icmp[1] == 0 => ReplyKind::Hop,
+            ICMP_DEST_UNREACH_V4 if from == target && protocol == 17 && icmp[1] == 3 => {
+                ReplyKind::Reached
+            }
+            ICMP_DEST_UNREACH_V4 => ReplyKind::Unreachable(icmp[1]),
+            _ => return None,
+        };
+        Some(Reply {
+            sequence: 0,
+            token,
+            destination: None,
+            ip: from,
+            kind,
+            received_at,
+        })
+    }
+
+    fn parse_icmp_probe_reply_v6(
+        data: &[u8],
+        from: IpAddr,
+        target: IpAddr,
+        protocol: u8,
+        trace_port: u16,
+        received_at: Instant,
+    ) -> Option<Reply> {
+        let packet = IcmpPacket::decode(data).ok()?;
+        if !matches!(
+            packet.message_type,
+            ICMP_TIME_EXCEEDED_V6 | ICMP_DEST_UNREACH_V6
+        ) {
+            return None;
+        }
+        let embedded = &packet.payload;
+        let l4_offset = ipv6_transport_offset(embedded, protocol)?;
+        let IpAddr::V6(target_ip) = target else {
+            return None;
+        };
+        if embedded[24..40] != target_ip.octets() {
+            return None;
+        }
+        let l4 = &embedded[l4_offset..];
+        if l4.len() < 8 || u16::from_be_bytes([l4[2], l4[3]]) < trace_port {
+            return None;
+        }
+        Some(Reply {
+            sequence: 0,
+            token: u16::from_be_bytes([l4[2], l4[3]]),
+            destination: None,
+            ip: from,
+            kind: if packet.message_type == ICMP_TIME_EXCEEDED_V6 && packet.code == 0 {
+                ReplyKind::Hop
+            } else if packet.message_type == ICMP_TIME_EXCEEDED_V6 {
+                return None;
+            } else if from == target && packet.code == 4 {
+                ReplyKind::Reached
+            } else {
+                ReplyKind::Unreachable(packet.code)
+            },
+            received_at,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_udp_error(
+        data: &[u8],
+        ident: u16,
+        error: ErrorQueueReply,
+        target: IpAddr,
+    ) -> Option<Reply> {
+        let destination = error.destination?;
+        let expected = match (destination, target) {
+            (SocketAddr::V4(destination), IpAddr::V4(target)) => destination.ip() == &target,
+            (SocketAddr::V6(destination), IpAddr::V6(target)) => destination.ip() == &target,
+            _ => false,
+        };
+        if !expected || destination.port() == 0 {
+            return None;
+        }
+        let marker = udp_probe_marker(ident, destination.port());
+        let quoted = data.len().min(marker.len());
+        // Routers may quote only the UDP header, leaving no payload in the error queue.
+        if data[..quoted] != marker[..quoted] {
+            return None;
+        }
+        Some(Reply {
+            sequence: 0,
+            token: destination.port(),
+            destination: Some(destination),
+            ip: error.from,
+            kind: match (target.is_ipv4(), error.kind, error.code) {
+                (true, ICMP_TIME_EXCEEDED_V4, 0) | (false, ICMP_TIME_EXCEEDED_V6, 0) => {
+                    ReplyKind::Hop
+                }
+                (true, ICMP_DEST_UNREACH_V4, 3) | (false, ICMP_DEST_UNREACH_V6, 4)
+                    if error.from == target =>
+                {
+                    ReplyKind::Reached
+                }
+                (true, ICMP_DEST_UNREACH_V4, code) | (false, ICMP_DEST_UNREACH_V6, code) => {
+                    ReplyKind::Unreachable(code)
+                }
+                _ => return None,
+            },
+            received_at: Instant::now(),
+        })
     }
 
     fn embedded_sequence_v4(icmp: &[u8], target: IpAddr) -> Option<u16> {
@@ -655,26 +1450,50 @@ mod unix {
         let IpAddr::V6(target) = target else {
             return None;
         };
-        if payload.len() < 48 || payload[0] >> 4 != 6 || payload[24..40] != target.octets() {
+        let offset = ipv6_transport_offset(payload, 58)?;
+        (offset + 8 <= payload.len()
+            && payload[24..40] == target.octets()
+            && payload[offset] == 128
+            && payload[offset + 4..offset + 6] == trace_ident().to_be_bytes())
+        .then(|| u16::from_be_bytes([payload[offset + 6], payload[offset + 7]]))
+    }
+
+    fn ipv6_transport_offset(payload: &[u8], protocol: u8) -> Option<usize> {
+        if payload.len() < 40 || payload[0] >> 4 != 6 {
+            return None;
+        }
+        let declared = 40 + usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+        if declared < 48 {
             return None;
         }
         let mut offset = 40usize;
+        let mut next_header = payload[6];
         loop {
             if offset + 8 > payload.len() {
                 return None;
             }
-            let next = match payload[offset] {
-                0 | 43 | 60 => (payload[offset + 1] as usize + 1) * 8,
-                44 => 8,
-                51 => (payload[offset + 1] as usize + 2) * 4,
+            let next = match next_header {
+                0 | 43 | 60 => {
+                    next_header = payload[offset];
+                    (payload[offset + 1] as usize + 1) * 8
+                }
+                44 => {
+                    if u16::from_be_bytes([payload[offset + 2], payload[offset + 3]]) & 0xfff8 != 0
+                    {
+                        return None;
+                    }
+                    next_header = payload[offset];
+                    8
+                }
+                51 => {
+                    next_header = payload[offset];
+                    (payload[offset + 1] as usize + 2) * 4
+                }
                 _ => break,
             };
             offset = offset.checked_add(next)?;
         }
-        (offset + 8 <= payload.len()
-            && payload[offset] == 128
-            && payload[offset + 4..offset + 6] == trace_ident().to_be_bytes())
-        .then(|| u16::from_be_bytes([payload[offset + 6], payload[offset + 7]]))
+        (next_header == protocol).then_some(offset)
     }
 
     async fn render(rows: &[Row]) {
@@ -699,7 +1518,7 @@ mod unix {
             if row.nodes.is_empty() {
                 cells.push((
                     row.ttl.to_string(),
-                    "-".to_string(),
+                    "*".to_string(),
                     "-".to_string(),
                     "*".to_string(),
                 ));
@@ -846,7 +1665,12 @@ mod unix {
 
         #[async_trait]
         impl ProbeSender for TestSender {
-            async fn send_probe(&self, _data: Vec<u8>, _target: IpAddr, ttl: u8) -> io::Result<()> {
+            async fn send_probe(
+                &self,
+                _probe: ProbePacket,
+                _target: IpAddr,
+                ttl: u8,
+            ) -> io::Result<()> {
                 self.ttl_log.lock().unwrap().push(ttl);
                 Ok(())
             }
@@ -868,11 +1692,15 @@ mod unix {
             });
             run_probes(
                 sender,
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                trace_ident(),
-                12,
-                max_hops,
-                timeout,
+                ProbeRequest {
+                    target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    ident: trace_ident(),
+                    protocol: TraceProtocol::Icmp,
+                    base_port: 33434,
+                    payload_size: 12,
+                    max_hops,
+                    timeout,
+                },
                 &mut rx,
             )
             .await
@@ -888,6 +1716,321 @@ mod unix {
             data[16..20].copy_from_slice(&dst.octets());
             data.extend_from_slice(payload);
             data
+        }
+
+        fn tcp_control_packet(
+            src: Ipv4Addr,
+            dst: Ipv4Addr,
+            source: u16,
+            destination: u16,
+            flags: u8,
+        ) -> Vec<u8> {
+            let mut packet = vec![0u8; 40];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&40u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&src.octets());
+            packet[16..20].copy_from_slice(&dst.octets());
+            packet[20..22].copy_from_slice(&source.to_be_bytes());
+            packet[22..24].copy_from_slice(&destination.to_be_bytes());
+            packet[32] = 0x50;
+            packet[33] = flags;
+            packet
+        }
+
+        fn ipv4_transport_packet(
+            src: Ipv4Addr,
+            dst: Ipv4Addr,
+            protocol: u8,
+            payload: &[u8],
+        ) -> Vec<u8> {
+            let mut packet = ipv4_packet(src, dst, payload);
+            packet[9] = protocol;
+            packet
+        }
+
+        fn icmp_error(icmp_type: u8, code: u8, embedded: &[u8]) -> Vec<u8> {
+            let mut packet = vec![icmp_type, code, 0, 0, 0, 0, 0, 0];
+            packet.extend(embedded);
+            packet
+        }
+
+        fn udp_header(source: u16, destination: u16) -> [u8; 8] {
+            let mut udp = [0u8; 8];
+            udp[0..2].copy_from_slice(&source.to_be_bytes());
+            udp[2..4].copy_from_slice(&destination.to_be_bytes());
+            udp[4..6].copy_from_slice(&8u16.to_be_bytes());
+            udp
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn udp_error_queue_reaches_closed_loopback_port_without_raw_socket() {
+            let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+            let reserve = std::net::UdpSocket::bind(SocketAddr::new(target, 0)).unwrap();
+            let base_port = reserve.local_addr().unwrap().port().min(65533);
+            drop(reserve);
+            let socket = Arc::new(TraceSocket::new(false, TraceProtocol::Udp, base_port).unwrap());
+            let (tx, mut rx) = mpsc::channel(8);
+            let receiver = spawn_receiver(socket.clone(), target, tx);
+            let result = run_probes(
+                socket.as_ref(),
+                ProbeRequest {
+                    target,
+                    ident: trace_ident(),
+                    protocol: TraceProtocol::Udp,
+                    base_port,
+                    payload_size: 4,
+                    max_hops: 1,
+                    timeout: Duration::from_secs(1),
+                },
+                &mut rx,
+            )
+            .await;
+            receiver.abort();
+            assert_eq!(result.unwrap().stop_hop, Some(1));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn correlates_udp_error_queue_payload_and_destination() {
+            let target = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+            let destination = SocketAddr::new(target, 33442);
+            let ident = trace_ident();
+            let marker = udp_probe_marker(ident, 33442);
+            let reply = parse_udp_error(
+                &marker,
+                ident,
+                ErrorQueueReply {
+                    from: target,
+                    kind: ICMP_TIME_EXCEEDED_V4,
+                    code: 0,
+                    destination: Some(destination),
+                },
+                target,
+            )
+            .unwrap();
+            assert_eq!(reply.token, 33442);
+            assert_eq!(reply.destination, Some(destination));
+            for (data, kind, code, expected) in [
+                (&[][..], ICMP_TIME_EXCEEDED_V4, 0, ReplyKind::Hop),
+                (&marker[..], ICMP_DEST_UNREACH_V4, 3, ReplyKind::Reached),
+                (
+                    &marker[..],
+                    ICMP_DEST_UNREACH_V4,
+                    13,
+                    ReplyKind::Unreachable(13),
+                ),
+            ] {
+                assert_eq!(
+                    parse_udp_error(
+                        data,
+                        ident,
+                        ErrorQueueReply {
+                            from: target,
+                            kind,
+                            code,
+                            destination: Some(destination),
+                        },
+                        target
+                    )
+                    .unwrap()
+                    .kind,
+                    expected
+                );
+            }
+
+            assert!(
+                parse_udp_error(
+                    &marker,
+                    ident ^ 1,
+                    ErrorQueueReply {
+                        from: target,
+                        kind: ICMP_TIME_EXCEEDED_V4,
+                        code: 0,
+                        destination: Some(destination),
+                    },
+                    target,
+                )
+                .is_none()
+            );
+            assert!(
+                parse_udp_error(
+                    &marker,
+                    ident,
+                    ErrorQueueReply {
+                        from: target,
+                        kind: ICMP_TIME_EXCEEDED_V4,
+                        code: 0,
+                        destination: Some(SocketAddr::new(target, 33443)),
+                    },
+                    target,
+                )
+                .is_none()
+            );
+        }
+
+        fn tcp_header(source: u16, destination: u16, flags: u8) -> [u8; 20] {
+            let mut tcp = [0u8; 20];
+            tcp[0..2].copy_from_slice(&source.to_be_bytes());
+            tcp[2..4].copy_from_slice(&destination.to_be_bytes());
+            tcp[12] = 0x50;
+            tcp[13] = flags;
+            tcp
+        }
+
+        #[test]
+        fn parses_udp_reachability_and_rejects_wrong_ports() {
+            let hop = Ipv4Addr::new(192, 0, 2, 1);
+            let target = Ipv4Addr::new(198, 51, 100, 1);
+            let embedded_hop = ipv4_transport_packet(hop, target, 17, &udp_header(49000, 33442));
+            let embedded_target =
+                ipv4_transport_packet(target, target, 17, &udp_header(49000, 33442));
+            let packet = ipv4_packet(
+                hop,
+                Ipv4Addr::LOCALHOST,
+                &icmp_error(ICMP_TIME_EXCEEDED_V4, 0, &embedded_hop),
+            );
+            let reply = parse_reply(
+                &packet,
+                IpAddr::V4(hop),
+                IpAddr::V4(target),
+                TraceProtocol::Udp,
+                33442,
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.token, 33442);
+            assert_eq!(reply.kind, ReplyKind::Hop);
+            assert!(
+                parse_reply(
+                    &packet,
+                    IpAddr::V4(hop),
+                    IpAddr::V4(target),
+                    TraceProtocol::Udp,
+                    33443,
+                    Instant::now(),
+                )
+                .is_none()
+            );
+
+            let packet = ipv4_packet(
+                target,
+                Ipv4Addr::LOCALHOST,
+                &icmp_error(ICMP_DEST_UNREACH_V4, 3, &embedded_target),
+            );
+            let reply = parse_reply(
+                &packet,
+                IpAddr::V4(target),
+                IpAddr::V4(target),
+                TraceProtocol::Udp,
+                33442,
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.kind, ReplyKind::Reached);
+        }
+
+        #[test]
+        fn parses_tcp_icmp_and_control_replies_using_source_port() {
+            let hop = Ipv4Addr::new(192, 0, 2, 1);
+            let target = Ipv4Addr::new(198, 51, 100, 1);
+            let source_port = 33442;
+            let target_port = 443;
+            let embedded =
+                ipv4_transport_packet(hop, target, 6, &tcp_header(source_port, target_port, 0x02));
+            let packet = ipv4_packet(
+                hop,
+                Ipv4Addr::LOCALHOST,
+                &icmp_error(ICMP_TIME_EXCEEDED_V4, 0, &embedded),
+            );
+            let reply = parse_reply(
+                &packet,
+                IpAddr::V4(hop),
+                IpAddr::V4(target),
+                TraceProtocol::Tcp,
+                target_port,
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.token, source_port);
+            assert_eq!(reply.kind, ReplyKind::Hop);
+            let mut quoted = embedded.clone();
+            quoted.truncate(28);
+            let short = ipv4_packet(
+                hop,
+                Ipv4Addr::LOCALHOST,
+                &icmp_error(ICMP_TIME_EXCEEDED_V4, 0, &quoted),
+            );
+            assert_eq!(
+                parse_reply(
+                    &short,
+                    IpAddr::V4(hop),
+                    IpAddr::V4(target),
+                    TraceProtocol::Tcp,
+                    target_port,
+                    Instant::now()
+                )
+                .unwrap()
+                .token,
+                source_port
+            );
+
+            for flags in [0x04, 0x12] {
+                let packet = tcp_control_packet(
+                    target,
+                    Ipv4Addr::LOCALHOST,
+                    target_port,
+                    source_port,
+                    flags,
+                );
+                let reply = parse_reply(
+                    &packet,
+                    IpAddr::V4(target),
+                    IpAddr::V4(target),
+                    TraceProtocol::Tcp,
+                    target_port,
+                    Instant::now(),
+                )
+                .expect("parse TCP control reply");
+                assert_eq!(reply.token, source_port);
+                assert_eq!(reply.kind, ReplyKind::Reached);
+            }
+        }
+
+        #[test]
+        fn rejects_icmp_errors_for_other_destinations_and_protocols() {
+            let hop = Ipv4Addr::new(192, 0, 2, 1);
+            let target = Ipv4Addr::new(198, 51, 100, 1);
+            let embedded = ipv4_transport_packet(hop, target, 6, &tcp_header(33442, 443, 0x02));
+            let packet = ipv4_packet(
+                hop,
+                Ipv4Addr::LOCALHOST,
+                &icmp_error(ICMP_TIME_EXCEEDED_V4, 0, &embedded),
+            );
+            assert!(
+                parse_reply(
+                    &packet,
+                    IpAddr::V4(hop),
+                    IpAddr::V4(target),
+                    TraceProtocol::Udp,
+                    443,
+                    Instant::now(),
+                )
+                .is_none()
+            );
+            assert!(
+                parse_reply(
+                    &packet,
+                    IpAddr::V4(hop),
+                    IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                    TraceProtocol::Tcp,
+                    443,
+                    Instant::now(),
+                )
+                .is_none()
+            );
         }
 
         #[test]
@@ -918,7 +2061,7 @@ mod unix {
         }
 
         #[test]
-        fn parses_ipv4_dgram_replies_without_ip_header() {
+        fn parses_ipv4_icmp_with_out_and_with_ip_header() {
             let target = Ipv4Addr::new(198, 51, 100, 1);
             let inner = IcmpPacket::new_request(false, trace_ident(), 44, vec![0; 12]).encode();
             let mut time_exceeded = vec![ICMP_TIME_EXCEEDED_V4, 0, 0, 0, 0, 0, 0, 0];
@@ -953,10 +2096,11 @@ mod unix {
             let inner = IcmpPacket::new_request(true, trace_ident(), 43, vec![0; 12]).encode();
             let mut embedded = vec![0u8; 48];
             embedded[0] = 0x60;
+            embedded[4..6].copy_from_slice(&(8u16 + inner.len() as u16).to_be_bytes());
             embedded[6] = 44;
             embedded[7] = 8;
             embedded[24..40].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
-            embedded[40] = 44;
+            embedded[40] = 58;
             embedded.extend(inner);
             let mut packet = vec![ICMP_TIME_EXCEEDED_V6, 0, 0, 0, 0, 0, 0, 0];
             packet.extend(embedded);
@@ -977,6 +2121,8 @@ mod unix {
             let received_at = started + Duration::from_millis(7);
             let reply = Reply {
                 sequence: 1,
+                token: trace_ident(),
+                destination: None,
                 ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 kind: ReplyKind::Reached,
                 received_at,
@@ -991,6 +2137,8 @@ mod unix {
                     &[0; 4],
                     IpAddr::V4(Ipv4Addr::LOCALHOST),
                     IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    TraceProtocol::Icmp,
+                    33434,
                     Instant::now(),
                 )
                 .is_none()
@@ -1027,20 +2175,49 @@ mod unix {
 
         #[test]
         fn packet_size_uses_ip_total_length() {
+            for (ip, minimum) in [
+                (IpAddr::V4(Ipv4Addr::LOCALHOST), 32),
+                (IpAddr::V6(Ipv6Addr::LOCALHOST), 52),
+            ] {
+                assert_eq!(
+                    packet_size(ip, Some(minimum), TraceProtocol::Udp).unwrap(),
+                    minimum
+                );
+                assert!(packet_size(ip, Some(minimum - 1), TraceProtocol::Udp).is_err());
+            }
             assert_eq!(
-                packet_size(IpAddr::V4(Ipv4Addr::LOCALHOST), None).unwrap(),
+                packet_size(IpAddr::V4(Ipv4Addr::LOCALHOST), None, TraceProtocol::Icmp).unwrap(),
                 40
             );
             assert_eq!(
-                packet_size(IpAddr::V6(Ipv6Addr::LOCALHOST), None).unwrap(),
+                packet_size(IpAddr::V6(Ipv6Addr::LOCALHOST), None, TraceProtocol::Icmp).unwrap(),
                 60
             );
             assert_eq!(
-                packet_size(IpAddr::V4(Ipv4Addr::LOCALHOST), Some(56)).unwrap(),
+                packet_size(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    Some(56),
+                    TraceProtocol::Icmp
+                )
+                .unwrap(),
                 56
             );
-            assert!(packet_size(IpAddr::V4(Ipv4Addr::LOCALHOST), Some(20)).is_err());
-            assert!(packet_size(IpAddr::V6(Ipv6Addr::LOCALHOST), Some(40)).is_err());
+            assert!(
+                packet_size(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    Some(20),
+                    TraceProtocol::Icmp
+                )
+                .is_err()
+            );
+            assert!(
+                packet_size(
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    Some(40),
+                    TraceProtocol::Icmp
+                )
+                .is_err()
+            );
         }
 
         #[test]
@@ -1056,6 +2233,7 @@ mod unix {
                     seq,
                     Probe {
                         ttl: 1,
+                        token: seq,
                         started: now,
                         deadline: now + Duration::from_secs(1),
                         reply: Some((IpAddr::V4(ip), Duration::from_millis(rtt), ReplyKind::Hop)),
@@ -1073,7 +2251,48 @@ mod unix {
 
         #[test]
         fn missing_location_is_a_placeholder() {
-            assert_eq!(location_for(None, IpAddr::V4(Ipv4Addr::LOCALHOST)), "-");
+            assert_eq!(
+                location_for(None, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+                "-"
+            );
+        }
+
+        #[test]
+        fn internal_addresses_have_a_local_label() {
+            for ip in [
+                Ipv4Addr::new(10, 1, 2, 3),
+                Ipv4Addr::new(172, 16, 0, 1),
+                Ipv4Addr::new(172, 31, 255, 254),
+                Ipv4Addr::new(192, 168, 1, 1),
+                Ipv4Addr::LOCALHOST,
+            ] {
+                assert_eq!(location_for(None, IpAddr::from(ip)), "Internal node");
+            }
+            assert_eq!(
+                location_for(None, IpAddr::V6(Ipv6Addr::LOCALHOST)),
+                "Internal node"
+            );
+            for ip in [
+                Ipv4Addr::new(1, 1, 1, 1),
+                Ipv4Addr::new(172, 15, 255, 255),
+                Ipv4Addr::new(172, 32, 0, 1),
+            ] {
+                assert_eq!(location_for(None, IpAddr::from(ip)), "-");
+            }
+        }
+
+        #[test]
+        fn unanswered_hop_uses_a_star_in_the_ip_column() {
+            let rows = vec![Row {
+                ttl: 1,
+                nodes: Vec::new(),
+            }];
+            let rendered = render_rows(&rows, None);
+            let lines: Vec<_> = rendered.lines().collect();
+            assert!(lines[2].contains("1"));
+            let columns: Vec<_> = lines[2].split('|').map(str::trim).collect();
+            assert_eq!(columns[1], "*");
+            assert_eq!(columns[3], "*");
         }
 
         #[test]
@@ -1106,6 +2325,7 @@ mod unix {
                     seq,
                     Probe {
                         ttl: ttl as u8,
+                        token: seq,
                         started: now,
                         deadline: now + Duration::from_secs(1),
                         reply: None,
@@ -1121,6 +2341,7 @@ mod unix {
             let now = Instant::now();
             let probe = Probe {
                 ttl: 1,
+                token: 1,
                 started: now - Duration::from_secs(1),
                 deadline: now - Duration::from_millis(1),
                 reply: None,
@@ -1135,6 +2356,7 @@ mod unix {
             let now = Instant::now();
             let probe = |ttl| Probe {
                 ttl,
+                token: ttl as u16,
                 started: now,
                 deadline: now + Duration::from_secs(1),
                 reply: None,
@@ -1156,6 +2378,8 @@ mod unix {
                 Duration::from_millis(30),
                 vec![Reply {
                     sequence: 7,
+                    token: trace_ident(),
+                    destination: None,
                     ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                     kind: ReplyKind::Reached,
                     received_at: Instant::now() + Duration::from_millis(1),
@@ -1185,6 +2409,8 @@ mod unix {
                 Duration::from_millis(30),
                 vec![Reply {
                     sequence: 4,
+                    token: trace_ident(),
+                    destination: None,
                     ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                     kind: ReplyKind::Unreachable(3),
                     received_at: Instant::now(),
@@ -1216,6 +2442,66 @@ mod unix {
             assert_eq!(result.stop_hop, None);
             assert_eq!(result.max_sent, 2);
             assert!(result.probes.values().all(|probe| probe.reply.is_none()));
+        }
+
+        #[tokio::test]
+        async fn udp_raw_replies_match_tokens_and_reject_late_replies() {
+            for late in [false, true] {
+                let sender = TestSender::default();
+                let (tx, mut rx) = mpsc::channel(8);
+                tx.send(Reply {
+                    sequence: 0,
+                    token: 33434,
+                    destination: None,
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    kind: ReplyKind::Reached,
+                    received_at: Instant::now()
+                        + Duration::from_millis(if late { 1000 } else { 1 }),
+                })
+                .await
+                .unwrap();
+                let result = run_probes(
+                    &sender,
+                    ProbeRequest {
+                        target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        ident: trace_ident(),
+                        protocol: TraceProtocol::Udp,
+                        base_port: 33434,
+                        payload_size: 4,
+                        max_hops: 1,
+                        timeout: Duration::from_millis(20),
+                    },
+                    &mut rx,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.stop_hop, if late { None } else { Some(1) });
+                assert_eq!(
+                    result.probes.values().filter(|p| p.reply.is_some()).count(),
+                    usize::from(!late)
+                );
+            }
+        }
+
+        #[test]
+        fn tcp_packet_has_transport_header_payload_and_probe_ttl() {
+            let packet =
+                build_tcp_packet(IpAddr::V4(Ipv4Addr::LOCALHOST), 443, 33442, &[1, 2, 3], 7)
+                    .unwrap();
+            assert_eq!(packet.len(), 43);
+            assert_eq!(packet[8], 7);
+            assert_eq!(&packet[20..24], &[0x82, 0xa2, 0x01, 0xbb]);
+            assert_eq!(&packet[40..], &[1, 2, 3]);
+            assert_eq!(
+                tcp_checksum(
+                    Ipv4Addr::LOCALHOST,
+                    &packet[20..],
+                    &Ipv4Addr::LOCALHOST.octets()
+                ),
+                0
+            );
+            #[cfg(not(target_os = "macos"))]
+            assert_eq!(ip_checksum(&packet[..20]), 0);
         }
 
         #[test]
@@ -1351,7 +2637,7 @@ mod unix {
             assert!(lines[3].starts_with("    | 192.0.2.2"));
             assert!(lines[4].contains("2 | 192.0.2.2") && lines[4].contains("5.500 ms"));
             assert!(!lines[4].contains("*"));
-            assert!(lines[5].contains("| -") && lines[5].contains("(error 3)"));
+            assert!(lines[5].contains("| Internal node") && lines[5].contains("(error 3)"));
             assert!(lines[5].contains("4.000 ms (error 3)"));
             assert!(
                 lines[2..].iter().all(|line| {
