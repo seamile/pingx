@@ -183,11 +183,7 @@ mod platform {
         let timeout = cli.timeout;
         let size = packet_size(target, requested, protocol)?;
         if protocol == TraceProtocol::Udp {
-            anyhow::ensure!(
-                u32::from(trace_port) + u32::from(max_hops) * PROBES_PER_HOP as u32
-                    <= u32::from(u16::MAX) + 1,
-                "UDP traceroute port range exceeds 65535"
-            );
+            validate_udp_port_range(trace_port, max_hops)?;
         }
         let local = crate::probe::tcp_syn::local_address_for(target)?;
         let socket = Arc::new(TraceSocket::new(local, target, protocol, trace_port)?);
@@ -455,6 +451,15 @@ mod platform {
             TraceProtocol::Udp => base.wrapping_add(sequence - 1),
             TraceProtocol::Tcp => unreachable!("TCP probes reserve an ephemeral source port"),
         }
+    }
+
+    fn validate_udp_port_range(base: u16, max_hops: u8) -> Result<()> {
+        anyhow::ensure!(
+            u32::from(base) + u32::from(max_hops) * PROBES_PER_HOP as u32
+                <= u32::from(u16::MAX) + 1,
+            "UDP traceroute port range exceeds 65535"
+        );
+        Ok(())
     }
 
     fn tcp_probe_sequence(seed: u32, source_port: u16) -> u32 {
@@ -2978,6 +2983,13 @@ mod platform {
             assert!(can_send(255, 255, None, SEND_WINDOW - PROBES_PER_HOP));
             assert!(!can_send(1, 255, None, SEND_WINDOW));
             assert!(!can_send(1, 255, None, SEND_WINDOW - PROBES_PER_HOP + 1));
+        }
+
+        #[test]
+        fn udp_trace_port_range_rejects_the_first_overflow() {
+            assert!(validate_udp_port_range(65533, 1).is_ok());
+            assert!(validate_udp_port_range(65534, 1).is_err());
+            assert!(validate_udp_port_range(33434, 255).is_ok());
         }
 
         #[test]
