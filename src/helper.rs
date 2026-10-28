@@ -198,6 +198,7 @@ mod macos {
         let Some(operation) = operation else {
             return Ok(None);
         };
+        validate_operation(&operation)?;
         ensure_helper_ready().await?;
         let json_path = cli
             .json
@@ -301,6 +302,11 @@ mod macos {
                     "helper request must contain 1 to 1024 targets"
                 );
                 anyhow::ensure!(!ping.tcp || !ping.udp, "TCP and UDP modes conflict");
+                anyhow::ensure!(!ping.ipv4 || !ping.ipv6, "IPv4 and IPv6 modes conflict");
+                anyhow::ensure!(
+                    !ping.json_file || ping.json,
+                    "JSON file output requires JSON mode"
+                );
                 anyhow::ensure!((1..=255).contains(&ping.ttl), "TTL must be 1..=255");
                 anyhow::ensure!(ping.size <= u16::MAX as usize, "packet size is too large");
                 anyhow::ensure!(ping.interval_ns > 0, "interval must be positive");
@@ -330,6 +336,7 @@ mod macos {
             Operation::Trace(trace) => {
                 anyhow::ensure!(trace.target.len() <= 1024, "target name is too long");
                 anyhow::ensure!(!trace.tcp || !trace.udp, "TCP and UDP modes conflict");
+                anyhow::ensure!(!trace.ipv4 || !trace.ipv6, "IPv4 and IPv6 modes conflict");
                 anyhow::ensure!(trace.timeout_ns > 0, "timeout must be positive");
                 anyhow::ensure!(
                     (1..=255).contains(&trace.max_hops),
@@ -507,7 +514,7 @@ mod macos {
             ),
             "PingX helper installation cancelled"
         );
-        install_as_user()
+        run_sudo(&[super::INTERNAL_INSTALL_ARG])
     }
 
     async fn run_client(operation: Operation, json_path: Option<PathBuf>) -> Result<i32> {
@@ -1261,6 +1268,25 @@ mod macos {
                 ping.targets = vec!["https://example.com".to_string()];
             }
             assert!(validate_operation(&operation).is_err());
+
+            {
+                let Operation::Ping(ping) = &mut operation else {
+                    unreachable!()
+                };
+                ping.targets = vec!["127.0.0.1".to_string()];
+                ping.ipv4 = true;
+                ping.ipv6 = true;
+            }
+            assert!(validate_operation(&operation).is_err());
+
+            {
+                let Operation::Ping(ping) = &mut operation else {
+                    unreachable!()
+                };
+                ping.ipv6 = false;
+                ping.json = false;
+            }
+            assert!(validate_operation(&operation).is_err());
         }
 
         #[test]
@@ -1299,6 +1325,47 @@ mod macos {
             let (reader, _) = server.into_split();
             let mut reader = BufReader::new(reader);
             assert!(read_frame::<ClientControl>(&mut reader, 4).await.is_err());
+        }
+
+        #[tokio::test]
+        async fn helper_status_is_scoped_to_the_peer_uid() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let allowed_uid = unsafe { libc::geteuid() } as u32;
+            let task = tokio::spawn(async move {
+                handle_connection(
+                    server,
+                    &HelperState {
+                        protocol_version: PROTOCOL_VERSION,
+                        allowed_uid,
+                    },
+                )
+                .await
+            });
+            let (reader, mut writer) = client.into_split();
+            write_frame(
+                &mut writer,
+                &Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    action: Action::Status,
+                },
+            )
+            .await
+            .unwrap();
+            drop(writer);
+            let mut reader = BufReader::new(reader);
+            let response = read_frame::<Response>(&mut reader, MAX_RESPONSE)
+                .await
+                .unwrap()
+                .unwrap();
+            match response.result {
+                ResponseResult::Status {
+                    allowed_uid: reported,
+                } => {
+                    assert_eq!(reported, allowed_uid);
+                }
+                other => panic!("unexpected helper response: {other:?}"),
+            }
+            task.await.unwrap().unwrap();
         }
     }
 }
