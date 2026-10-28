@@ -11,7 +11,7 @@ use tokio::signal;
 pub use self::models::{PingResult, ProbeStatus, ResponseType};
 
 mod models {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::IpAddr;
     use std::time::Duration;
     use std::time::Instant;
@@ -72,6 +72,7 @@ mod models {
         pub response_counts: BTreeMap<ResponseType, u64>,
         pub local_failures: u64,
         pub network_errors: u64,
+        settled_sequences: BTreeSet<u64>,
     }
 
     impl PingStats {
@@ -86,10 +87,14 @@ mod models {
                 response_counts: BTreeMap::new(),
                 local_failures: 0,
                 network_errors: 0,
+                settled_sequences: BTreeSet::new(),
             }
         }
 
         pub fn update(&mut self, result: &PingResult) {
+            if !self.settled_sequences.insert(result.seq) {
+                return;
+            }
             self.transmitted += 1;
             match &result.status {
                 ProbeStatus::Success(kind) => {
@@ -863,6 +868,28 @@ mod tests {
         assert_eq!(get_val("avg:"), "-");
         assert_eq!(get_val("mdev:"), "-");
         assert_eq!(get_val("jitter:"), "-");
+    }
+
+    #[test]
+    fn repeated_probe_results_are_counted_once() {
+        let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let result = models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            seq: 1,
+            bytes: 0,
+            ttl: None,
+            rtt: Duration::from_millis(10),
+            status: models::ProbeStatus::Success(models::ResponseType::TcpOpen),
+        };
+
+        stats.update(&result);
+        stats.update(&result);
+
+        assert_eq!(stats.transmitted, 1);
+        assert_eq!(stats.received, 1);
+        assert_eq!(stats.response_counts[&models::ResponseType::TcpOpen], 1);
+        assert_eq!(stats.rtts, [Duration::from_millis(10)]);
     }
 
     #[test]
