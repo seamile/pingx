@@ -652,6 +652,9 @@ fn parse_icmp_error_v4(
         return None;
     }
     let header_len = usize::from(embedded[0] & 0x0f) * 4;
+    if header_len < 20 {
+        return None;
+    }
     let tcp = embedded.get(header_len..)?;
     if tcp.len() < 4
         || u16::from_be_bytes([tcp[0], tcp[1]]) != source_port
@@ -684,7 +687,7 @@ fn parse_icmp_error_v6(
     } else {
         return None;
     };
-    if !matches!(icmp[0], ICMP_DEST_UNREACH_V6 | ICMP_TIME_EXCEEDED_V6) {
+    if icmp.len() < 8 || !matches!(icmp[0], ICMP_DEST_UNREACH_V6 | ICMP_TIME_EXCEEDED_V6) {
         return None;
     }
     let embedded = &icmp[8..];
@@ -1063,6 +1066,23 @@ mod tests {
                 443,
             ),
             router_v6.into(),
+        );
+
+        let mut truncated_v6 = vec![0u8; 40];
+        truncated_v6[0] = 0x60;
+        truncated_v6[6] = 58;
+        truncated_v6[8..24].copy_from_slice(&router_v6.octets());
+        truncated_v6[24..40].copy_from_slice(&local_v6.octets());
+        assert!(
+            parse_icmp_error(
+                &truncated_v6,
+                IpAddr::V6(router_v6),
+                IpAddr::V6(local_v6),
+                IpAddr::V6(target_v6),
+                40000,
+                443,
+            )
+            .is_none()
         );
     }
 
