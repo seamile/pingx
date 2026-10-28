@@ -42,6 +42,13 @@ async fn main() {
 
     let args = Cli::parse_from(raw_args);
 
+    #[cfg(windows)]
+    if args.interface.is_some() {
+        eprintln!("pingx: interface binding (-I) is not supported on Windows");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(windows))]
     if let Some(iface) = args.interface.as_deref()
         && utils::get_interface_ips(iface).is_empty()
     {
