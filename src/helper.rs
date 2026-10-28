@@ -1144,14 +1144,22 @@ mod macos {
     struct StagedInstall {
         target: PathBuf,
         temporary: PathBuf,
+        backup_path: PathBuf,
         backup: Option<PathBuf>,
+        installed: bool,
     }
 
     impl StagedInstall {
         fn restore(&mut self) {
+            if !self.installed {
+                return;
+            }
             if let Some(backup) = self.backup.take() {
                 let _ = fs::rename(backup, &self.target);
+            } else {
+                let _ = fs::remove_file(&self.target);
             }
+            self.installed = false;
         }
     }
 
@@ -1203,14 +1211,16 @@ mod macos {
         staged.push(StagedInstall {
             target: path.to_path_buf(),
             temporary,
+            backup_path: backup,
             backup: None,
+            installed: false,
         });
         Ok(())
     }
 
     fn commit_install(staged: &mut [StagedInstall]) -> Result<()> {
         for (replaced, item) in staged.iter_mut().enumerate() {
-            let backup = item.temporary.with_extension("old");
+            let backup = item.backup_path.clone();
             let target = item.target.clone();
             item.backup = match fs::rename(&target, &backup) {
                 Ok(()) => Some(backup),
@@ -1223,14 +1233,28 @@ mod macos {
                 if let Some(backup) = &item.backup {
                     let _ = fs::rename(backup, &target);
                 }
+                item.installed = false;
+                let _ = fs::remove_file(&item.temporary);
                 rollback_install(&mut staged[..replaced]);
                 return Err(error).with_context(|| format!("replace {}", target.display()));
             }
-            File::open(target.parent().unwrap())?
-                .sync_all()
-                .with_context(|| format!("sync {}", target.display()))?;
+            item.installed = true;
+            if let Err(error) =
+                File::open(target.parent().unwrap()).and_then(|file| file.sync_all())
+            {
+                item.installed = false;
+                if let Some(backup) = &item.backup {
+                    let _ = fs::rename(backup, &target);
+                } else {
+                    let _ = fs::remove_file(&target);
+                }
+                let _ = fs::remove_file(&item.temporary);
+                rollback_install(&mut staged[..replaced]);
+                return Err(error).with_context(|| format!("sync {}", target.display()));
+            }
         }
         for item in staged {
+            item.installed = false;
             if let Some(backup) = item.backup.take() {
                 match fs::remove_file(backup) {
                     Ok(()) => {}
@@ -1379,7 +1403,7 @@ mod macos {
                     let parent = path.parent().unwrap();
                     let name = path.file_name().unwrap().to_str().unwrap();
                     ["tmp", "old"].map(|suffix| {
-                        parent.join(format!(".{LABEL}.{name}.{suffix}.{}", std::process::id()))
+                        parent.join(format!(".{LABEL}.{name}.{}.{}", suffix, std::process::id()))
                     })
                 })
                 .collect()
@@ -1437,6 +1461,35 @@ mod macos {
             assert!(commit_install(&mut staged).is_err());
             assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "old first");
             assert!(!paths[1].exists());
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn staged_install_removes_a_new_file_after_a_later_failure() {
+            let root = std::env::temp_dir().join(format!(
+                "pingx-helper-new-file-rollback-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let paths = [root.join("first"), root.join("second")];
+            let mut staged = Vec::new();
+            stage_install(&mut staged, &paths[0], 0o644, |output| {
+                output.write_all(b"new first")
+            })
+            .unwrap();
+            stage_install(&mut staged, &paths[1], 0o644, |output| {
+                output.write_all(b"new second")
+            })
+            .unwrap();
+            staged[1].target = root.join("missing/target");
+            assert!(commit_install(&mut staged).is_err());
+            assert!(!paths[0].exists());
+            assert!(
+                temporary_files(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+                    .iter()
+                    .all(|path| !path.exists())
+            );
             let _ = fs::remove_dir_all(&root);
         }
 
