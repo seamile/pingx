@@ -358,12 +358,15 @@ fn to_local_failure(error: impl ToString) -> UdpProbeFailure {
     UdpProbeFailure::Local(error.to_string())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn receives_an_application_reply() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = server.local_addr().unwrap().port();
         tokio::spawn(async move {
