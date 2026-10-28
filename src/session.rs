@@ -91,9 +91,9 @@ mod models {
             }
         }
 
-        pub fn update(&mut self, result: &PingResult) {
+        pub fn update(&mut self, result: &PingResult) -> bool {
             if !self.settled_sequences.insert(result.seq) {
-                return;
+                return false;
             }
             self.transmitted += 1;
             match &result.status {
@@ -106,6 +106,7 @@ mod models {
                 ProbeStatus::NetworkError { .. } => self.network_errors += 1,
                 ProbeStatus::Timeout => {}
             }
+            true
         }
     }
 }
@@ -342,11 +343,10 @@ impl Session {
                 }
 
                 Some(result) = rx.recv() => {
-                    if inflight_packets > 0 { inflight_packets -= 1; }
-
-                    if let Some(stats) = all_stats.get_mut(&result.target) {
-                        stats.update(&result);
-                    }
+                    let settled = all_stats
+                        .get_mut(&result.target)
+                        .is_some_and(|stats| stats.update(&result));
+                    if settled && inflight_packets > 0 { inflight_packets -= 1; }
                     if !quiet && !json_stdout {
                         let protocol = target_protocols.get(&result.target).unwrap_or(&crate::cli::Protocol::Icmp);
                         Self::print_result(&result, protocol);
@@ -892,8 +892,8 @@ mod tests {
             status: models::ProbeStatus::Success(models::ResponseType::TcpOpen),
         };
 
-        stats.update(&result);
-        stats.update(&result);
+        assert!(stats.update(&result));
+        assert!(!stats.update(&result));
 
         assert_eq!(stats.transmitted, 1);
         assert_eq!(stats.received, 1);
