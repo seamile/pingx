@@ -1,5 +1,6 @@
 use crate::cli::Cli;
 use anyhow::Result;
+#[cfg(target_os = "macos")]
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
