@@ -5,8 +5,6 @@ use async_trait::async_trait;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(not(unix))]
-use std::{io, net::SocketAddr, time::Instant};
 use tokio::sync::{Mutex, mpsc};
 
 pub struct UdpPinger {
@@ -99,66 +97,48 @@ async fn probe(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 async fn probe(
     target: IpAddr,
     port: u16,
     size: usize,
     timeout: Duration,
-    _ttl: u32,
+    ttl: u32,
 ) -> (ProbeStatus, Duration, usize) {
-    let start = Instant::now();
-    let socket = match udp_socket(target, port).await {
-        Ok(socket) => socket,
-        Err(error) => {
-            return (
-                ProbeStatus::LocalError(error.to_string()),
-                Duration::ZERO,
-                0,
-            );
-        }
-    };
-    if let Err(error) = socket.send(&vec![0; size]).await {
-        return (
-            ProbeStatus::LocalError(error.to_string()),
-            Duration::ZERO,
-            0,
-        );
-    }
-    let mut buffer = vec![0; 65_535];
-    match tokio::time::timeout(timeout, socket.recv(&mut buffer)).await {
-        Ok(Ok(bytes)) => (
-            ProbeStatus::Success(ResponseType::UdpApplicationReply),
-            start.elapsed(),
-            bytes,
+    use crate::probe::udp_error::{UdpProbeFailure, UdpProbeKind};
+
+    match crate::probe::udp_windows::probe(target, port, size, timeout, ttl).await {
+        Ok(reply) => (
+            ProbeStatus::Success(match reply.kind {
+                UdpProbeKind::ApplicationReply => ResponseType::UdpApplicationReply,
+                UdpProbeKind::PortUnreachable => ResponseType::UdpPortUnreachable,
+            }),
+            reply.rtt,
+            reply.bytes,
         ),
-        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => (
-            ProbeStatus::Success(ResponseType::UdpPortUnreachable),
-            start.elapsed(),
-            0,
-        ),
-        Ok(Err(error)) => (
-            ProbeStatus::NetworkError {
-                node: None,
-                reason: error.to_string(),
-            },
+        Err(UdpProbeFailure::Timeout) => (ProbeStatus::Timeout, Duration::ZERO, 0),
+        Err(UdpProbeFailure::Network { node, reason }) => (
+            ProbeStatus::NetworkError { node, reason },
             Duration::ZERO,
             0,
         ),
-        Err(_) => (ProbeStatus::Timeout, Duration::ZERO, 0),
+        Err(UdpProbeFailure::Local(error)) => (ProbeStatus::LocalError(error), Duration::ZERO, 0),
     }
 }
 
-#[cfg(not(unix))]
-async fn udp_socket(target: IpAddr, port: u16) -> io::Result<tokio::net::UdpSocket> {
-    let socket = tokio::net::UdpSocket::bind(if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    })
-    .await?;
-    socket.connect(SocketAddr::new(target, port)).await?;
-    Ok(socket)
+#[cfg(not(any(unix, windows)))]
+async fn probe(
+    _target: IpAddr,
+    _port: u16,
+    _size: usize,
+    _timeout: Duration,
+    _ttl: u32,
+) -> (ProbeStatus, Duration, usize) {
+    (
+        ProbeStatus::LocalError("UDP ping is not implemented on this platform".to_string()),
+        Duration::ZERO,
+        0,
+    )
 }
 
 async fn send_result(

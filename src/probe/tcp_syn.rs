@@ -4,6 +4,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 #[cfg(target_os = "macos")]
 use tokio::sync::Mutex as AsyncMutex;
@@ -65,6 +66,7 @@ impl fmt::Display for TcpSynFailure {
     }
 }
 
+#[cfg(unix)]
 pub async fn probe(
     target: IpAddr,
     port: u16,
@@ -162,6 +164,7 @@ pub async fn probe(
 pub fn local_address_for(target: IpAddr) -> io::Result<IpAddr> {
     let v6 = target.is_ipv6();
     let socket = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
+    #[cfg(unix)]
     bind_device(&socket, v6)?;
     socket.connect(&SocketAddr::new(target, 9).into())?;
     socket
@@ -171,13 +174,138 @@ pub fn local_address_for(target: IpAddr) -> io::Result<IpAddr> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "local address unavailable"))
 }
 
-fn reserve_source_port(local: IpAddr) -> io::Result<Socket> {
+#[cfg(windows)]
+pub async fn probe_windows(
+    target: IpAddr,
+    port: u16,
+    timeout: Duration,
+    ttl: u32,
+) -> Result<TcpSynReply, TcpSynFailure> {
+    use crate::windivert::{Capture, Injector};
+
+    let ttl = u8::try_from(ttl)
+        .map_err(|_| TcpSynFailure::Local("TTL must be between 0 and 255".to_string()))?;
+    let local = local_address_for(target).map_err(to_local_failure)?;
+    let reservation = reserve_source_port(local).map_err(to_local_failure)?;
+    let source_port = reservation
+        .local_addr()
+        .map_err(to_local_failure)?
+        .as_socket()
+        .ok_or_else(|| TcpSynFailure::Local("local source port unavailable".to_string()))?
+        .port();
+    let sequence = next_sequence();
+    let packet = build_tcp_packet(
+        local,
+        target,
+        TcpSegment {
+            source_port,
+            target_port: port,
+            sequence,
+            acknowledgement: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        },
+        ttl,
+    )
+    .map_err(to_local_failure)?;
+    let capture =
+        Capture::open(&reply_filter(local, target, source_port, port)).map_err(to_local_failure)?;
+    let injector = Injector::open().map_err(to_local_failure)?;
+    let started = Instant::now();
+    injector
+        .send(&packet, target.is_ipv6())
+        .map_err(to_local_failure)?;
+    let deadline = started
+        .checked_add(timeout)
+        .ok_or_else(|| TcpSynFailure::Local("timeout is too large".to_string()))?;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(TcpSynFailure::Timeout);
+        }
+        let received = match capture.recv(remaining).await {
+            Ok(packet) => packet,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                return Err(TcpSynFailure::Timeout);
+            }
+            Err(error) => return Err(to_local_failure(error)),
+        };
+        if let Some(reply) = parse_tcp_reply(
+            &received.data,
+            target,
+            local,
+            target,
+            source_port,
+            port,
+            sequence,
+        ) {
+            if reply.kind == TcpSynKind::Open {
+                let reset = build_tcp_packet(
+                    local,
+                    target,
+                    TcpSegment {
+                        source_port,
+                        target_port: port,
+                        sequence: reply.acknowledgement,
+                        acknowledgement: 0,
+                        flags: TCP_RST,
+                        payload: &[],
+                    },
+                    ttl,
+                )
+                .map_err(to_local_failure)?;
+                injector
+                    .send(&reset, target.is_ipv6())
+                    .map_err(to_local_failure)?;
+            }
+            return Ok(TcpSynReply {
+                kind: reply.kind,
+                rtt: started.elapsed(),
+            });
+        }
+        if let Some(from) = packet_source(&received.data)
+            && let Some(failure) =
+                parse_icmp_error(&received.data, from, local, target, source_port, port)
+        {
+            return Err(failure);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn reply_filter(local: IpAddr, target: IpAddr, source_port: u16, target_port: u16) -> String {
+    if target.is_ipv4() {
+        format!(
+            "(inbound or loopback) and (((ip and ip.SrcAddr == {target} and ip.DstAddr == {local} and tcp.SrcPort == {target_port} and tcp.DstPort == {source_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK))) or (icmp and ip.DstAddr == {local} and (icmp.Type == {ICMP_DEST_UNREACH_V4} or icmp.Type == {ICMP_TIME_EXCEEDED_V4}))))"
+        )
+    } else {
+        format!(
+            "(inbound or loopback) and (((ipv6 and ipv6.SrcAddr == {target} and ipv6.DstAddr == {local} and tcp.SrcPort == {target_port} and tcp.DstPort == {source_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK))) or (icmpv6 and ipv6.DstAddr == {local} and (icmpv6.Type == {ICMP_DEST_UNREACH_V6} or icmpv6.Type == {ICMP_TIME_EXCEEDED_V6}))))"
+        )
+    }
+}
+
+#[cfg(windows)]
+fn packet_source(packet: &[u8]) -> Option<IpAddr> {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]).into())
+        }
+        Some(6) if packet.len() >= 40 => {
+            Some(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?).into())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn reserve_source_port(local: IpAddr) -> io::Result<Socket> {
     let socket = Socket::new(domain(local.is_ipv6()), Type::STREAM, Some(Protocol::TCP))?;
     socket.bind(&SocketAddr::new(local, 0).into())?;
     Ok(socket)
 }
 
-fn next_sequence() -> u32 {
+pub(crate) fn next_sequence() -> u32 {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -186,6 +314,7 @@ fn next_sequence() -> u32 {
     time ^ counter.rotate_left(13) ^ u32::from(std::process::id() as u16).rotate_left(24)
 }
 
+#[cfg(unix)]
 struct TcpSynSockets {
     send: AsyncFd<std::net::UdpSocket>,
     #[cfg(not(target_os = "macos"))]
@@ -195,6 +324,7 @@ struct TcpSynSockets {
     icmp: AsyncFd<std::net::UdpSocket>,
 }
 
+#[cfg(unix)]
 impl TcpSynSockets {
     fn new(local: IpAddr, target: IpAddr, ttl: u8) -> io::Result<Self> {
         let v6 = target.is_ipv6();
@@ -278,6 +408,7 @@ impl TcpSynSockets {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn raw_tcp_payload(packet: &[u8], target: IpAddr) -> io::Result<&[u8]> {
     #[cfg(target_os = "macos")]
     if target.is_ipv6() {
@@ -292,6 +423,7 @@ pub(crate) fn raw_tcp_payload(packet: &[u8], target: IpAddr) -> io::Result<&[u8]
     Ok(packet)
 }
 
+#[cfg(unix)]
 async fn recv_from(
     socket: &AsyncFd<std::net::UdpSocket>,
     data: &mut [u8],
@@ -310,6 +442,7 @@ async fn recv_from(
     }
 }
 
+#[cfg(unix)]
 fn raw_socket(v6: bool, protocol: Protocol) -> io::Result<Socket> {
     Socket::new(domain(v6), Type::RAW, Some(protocol)).map_err(|error| {
         if error.kind() == io::ErrorKind::PermissionDenied {
@@ -323,6 +456,7 @@ fn raw_socket(v6: bool, protocol: Protocol) -> io::Result<Socket> {
     })
 }
 
+#[cfg(unix)]
 fn bind_device(socket: &Socket, v6: bool) -> io::Result<()> {
     if let Some(interface) = crate::utils::get_bind_interface() {
         crate::utils::bind_socket_to_interface(socket, interface, v6)?;
@@ -424,12 +558,12 @@ fn fill_tcp_header(tcp: &mut [u8], segment: &TcpSegment<'_>) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ParsedTcpReply {
-    kind: TcpSynKind,
-    acknowledgement: u32,
+pub(crate) struct ParsedTcpReply {
+    pub(crate) kind: TcpSynKind,
+    pub(crate) acknowledgement: u32,
 }
 
-fn parse_tcp_reply(
+pub(crate) fn parse_tcp_reply(
     data: &[u8],
     from: IpAddr,
     local: IpAddr,
@@ -486,7 +620,7 @@ fn parse_tcp_reply(
     })
 }
 
-fn parse_icmp_error(
+pub(crate) fn parse_icmp_error(
     data: &[u8],
     from: IpAddr,
     local: IpAddr,
@@ -551,10 +685,21 @@ fn parse_icmp_error_v6(
     source_port: u16,
     target_port: u16,
 ) -> Option<TcpSynFailure> {
-    if data.len() < 8 || !matches!(data[0], ICMP_DEST_UNREACH_V6 | ICMP_TIME_EXCEEDED_V6) {
+    let icmp = if data.len() >= 40 && data[0] >> 4 == 6 {
+        let ((source, destination), icmp) = strip_ipv6(data, 58)?;
+        if IpAddr::V6(source) != from || IpAddr::V6(destination) != local {
+            return None;
+        }
+        icmp
+    } else if data.len() >= 8 && matches!(data[0], ICMP_DEST_UNREACH_V6 | ICMP_TIME_EXCEEDED_V6) {
+        data
+    } else {
+        return None;
+    };
+    if !matches!(icmp[0], ICMP_DEST_UNREACH_V6 | ICMP_TIME_EXCEEDED_V6) {
         return None;
     }
-    let embedded = &data[8..];
+    let embedded = &icmp[8..];
     if embedded.len() < 40 {
         return None;
     }
@@ -573,7 +718,7 @@ fn parse_icmp_error_v6(
     }
     Some(TcpSynFailure::Network {
         node: Some(from),
-        reason: icmp_reason(true, data[0], data[1]).to_string(),
+        reason: icmp_reason(true, icmp[0], icmp[1]).to_string(),
     })
 }
 
@@ -744,6 +889,21 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filter_matches_the_probe_tuple_and_reply_flags() {
+        let filter = reply_filter(
+            "192.0.2.10".parse().unwrap(),
+            "198.51.100.20".parse().unwrap(),
+            40000,
+            443,
+        );
+        assert!(filter.contains("tcp.SrcPort == 443"));
+        assert!(filter.contains("tcp.DstPort == 40000"));
+        assert!(filter.contains("tcp.SYN and tcp.ACK"));
+        assert!(filter.contains("icmp.Type == 3"));
     }
 
     #[cfg(target_os = "macos")]

@@ -81,7 +81,7 @@ impl Pinger for TcpPinger {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn probe(
     target: IpAddr,
     port: u16,
@@ -90,7 +90,11 @@ async fn probe(
 ) -> (ProbeStatus, std::time::Duration) {
     use crate::probe::tcp_syn::{self, TcpSynFailure, TcpSynKind};
 
-    match tcp_syn::probe(target, port, timeout, ttl).await {
+    #[cfg(unix)]
+    let result = tcp_syn::probe(target, port, timeout, ttl).await;
+    #[cfg(windows)]
+    let result = tcp_syn::probe_windows(target, port, timeout, ttl).await;
+    match result {
         Ok(reply) => (
             ProbeStatus::Success(match reply.kind {
                 TcpSynKind::Open => ResponseType::TcpOpen,
@@ -109,7 +113,7 @@ async fn probe(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn probe(
     _target: IpAddr,
     _port: u16,

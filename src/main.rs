@@ -7,6 +7,8 @@ mod probe;
 mod session;
 mod traceroute;
 mod utils;
+#[cfg(windows)]
+mod windivert;
 
 use clap::{CommandFactory, Parser};
 use cli::Cli;

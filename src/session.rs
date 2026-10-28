@@ -151,8 +151,14 @@ impl Session {
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
 
+        #[cfg(unix)]
         let mut client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
+        #[cfg(unix)]
         let mut client_v6: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
+        #[cfg(not(unix))]
+        let client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
+        #[cfg(not(unix))]
+        let client_v6: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
 
         for target_string in targets {
             // Detect protocol and host
@@ -193,6 +199,7 @@ impl Session {
                         };
 
                     // Initialize ICMP client if needed
+                    #[cfg(unix)]
                     if let crate::cli::Protocol::Icmp = protocol {
                         if target_addr.is_ipv4() {
                             if client_v4.is_none() {

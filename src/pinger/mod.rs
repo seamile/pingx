@@ -36,21 +36,36 @@ pub fn create_pinger(
     client_v4: Option<Arc<IcmpClient>>,
     client_v6: Option<Arc<IcmpClient>>,
 ) -> Box<dyn Pinger> {
+    #[cfg(windows)]
+    let _ = (client_v4, client_v6);
     match protocol {
         Protocol::Icmp => {
-            let client = if target.is_ipv6() {
-                client_v6.expect("IPv6 client needed but not provided")
-            } else {
-                client_v4.expect("IPv4 client needed but not provided")
-            };
-            Box::new(icmp::IcmpPinger::new(
-                target_name,
-                target,
-                config.ttl,
-                config.size,
-                config.timeout,
-                client,
-            ))
+            #[cfg(unix)]
+            {
+                let client = if target.is_ipv6() {
+                    client_v6.expect("IPv6 client needed but not provided")
+                } else {
+                    client_v4.expect("IPv4 client needed but not provided")
+                };
+                Box::new(icmp::IcmpPinger::new(
+                    target_name,
+                    target,
+                    config.ttl,
+                    config.size,
+                    config.timeout,
+                    client,
+                ))
+            }
+            #[cfg(windows)]
+            {
+                Box::new(icmp::windows::IcmpPinger::new(
+                    target_name,
+                    target,
+                    config.ttl,
+                    config.size,
+                    config.timeout,
+                ))
+            }
         }
         Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(
             target_name,
