@@ -1133,9 +1133,16 @@ mod macos {
     fn ensure_root_directory(path: &Path) -> Result<()> {
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
         let metadata = fs::symlink_metadata(path)?;
+        validate_install_directory(path, &metadata, 0)
+    }
+
+    fn validate_install_directory(path: &Path, metadata: &fs::Metadata, owner: u32) -> Result<()> {
         anyhow::ensure!(
-            metadata.is_dir() && metadata.uid() == 0 && !metadata.file_type().is_symlink(),
-            "{} is not a root-owned directory",
+            metadata.is_dir()
+                && metadata.uid() == owner
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o022 == 0,
+            "{} is not a secure root-owned directory",
             path.display()
         );
         Ok(())
@@ -1394,6 +1401,34 @@ mod macos {
             };
             let data = serde_json::to_vec(&state).unwrap();
             assert_eq!(serde_json::from_slice::<HelperState>(&data).unwrap(), state);
+        }
+
+        #[test]
+        fn install_directories_must_be_private_and_regular() {
+            let root =
+                std::env::temp_dir().join(format!("pingx-helper-directory-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            let owner = fs::symlink_metadata(&root).unwrap().uid();
+            assert!(
+                validate_install_directory(&root, &fs::symlink_metadata(&root).unwrap(), owner)
+                    .is_ok()
+            );
+
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(
+                validate_install_directory(&root, &fs::symlink_metadata(&root).unwrap(), owner)
+                    .is_err()
+            );
+
+            let link = root.join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            assert!(
+                validate_install_directory(&link, &fs::symlink_metadata(&link).unwrap(), owner)
+                    .is_err()
+            );
+            let _ = fs::remove_dir_all(&root);
         }
 
         fn temporary_files(paths: &[&Path]) -> Vec<PathBuf> {
