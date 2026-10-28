@@ -829,10 +829,8 @@ mod macos {
             unsafe { libc::geteuid() } == 0,
             "helper removal must run as root"
         );
-        let _ = Command::new("launchctl")
-            .args(["bootout", &format!("system/{LABEL}")])
-            .status();
-        for path in [HELPER_PATH, PLIST_PATH, STATE_PATH] {
+        stop_helper_service()?;
+        for path in [HELPER_PATH, PLIST_PATH, STATE_PATH, SOCKET_PATH] {
             match fs::remove_file(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
