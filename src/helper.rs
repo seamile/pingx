@@ -746,7 +746,7 @@ mod macos {
             io::copy(&mut input, output).map(|_| ())
         })?;
 
-        let plist = launchd_plist()?;
+        let plist = launchd_plist(allowed_uid)?;
         ensure_root_directory(Path::new("/Library/LaunchDaemons"))?;
         atomic_install(Path::new(PLIST_PATH), 0o644, |output| {
             output.write_all(plist.as_bytes())
@@ -1159,7 +1159,7 @@ mod macos {
         Ok(())
     }
 
-    fn launchd_plist() -> Result<String> {
+    fn launchd_plist(allowed_uid: u32) -> Result<String> {
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1173,6 +1173,7 @@ mod macos {
     <key>pingx</key>
     <dict>
       <key>SockPathName</key><string>{SOCKET_PATH}</string>
+      <key>SockPathOwner</key><integer>{allowed_uid}</integer>
       <key>SockPathMode</key><integer>438</integer>
     </dict>
   </dict>
@@ -1262,10 +1263,11 @@ mod macos {
 
         #[test]
         fn launchd_plist_uses_the_activation_socket() {
-            let plist = launchd_plist().unwrap();
+            let plist = launchd_plist(501).unwrap();
             assert!(plist.contains(LABEL));
             assert!(plist.contains(SOCKET_PATH));
             assert!(plist.contains(super::super::INTERNAL_DAEMON_ARG));
+            assert!(plist.contains("<key>SockPathOwner</key><integer>501</integer>"));
             assert!(plist.contains("<key>SockPathMode</key><integer>438</integer>"));
         }
 
