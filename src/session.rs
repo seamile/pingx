@@ -785,6 +785,15 @@ mod tests {
     }
 
     #[test]
+    fn json_file_output_is_synced_to_disk() {
+        let path =
+            std::env::temp_dir().join(format!("pingx-json-sync-{}.json", std::process::id()));
+        write_json_file(path.to_str().unwrap(), b"{\"ok\":true}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"ok\":true}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn test_stats_calculation() {
         let mut stats =
             models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
