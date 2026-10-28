@@ -443,7 +443,6 @@ impl Session {
                 }
             }
 
-            use std::io::Write;
             let json_output = if json_results.len() == 1 {
                 serde_json::to_string_pretty(&json_results[0]).unwrap()
             } else {
@@ -451,11 +450,7 @@ impl Session {
             };
 
             if let Some(path) = json_arg {
-                if let Ok(mut file) = std::fs::File::create(path) {
-                    let _ = file.write_all(json_output.as_bytes());
-                } else {
-                    eprintln!("pingx: Failed to write JSON to {}", path);
-                }
+                write_json_file(path, json_output.as_bytes())?;
             } else {
                 println!("{}", json_output);
             }
@@ -748,6 +743,18 @@ impl Session {
     }
 }
 
+fn write_json_file(path: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(path)
+        .map_err(|error| anyhow::anyhow!("write JSON to {path}: {error}"))?;
+    file.write_all(data)
+        .map_err(|error| anyhow::anyhow!("write JSON to {path}: {error}"))?;
+    file.sync_all()
+        .map_err(|error| anyhow::anyhow!("flush JSON to {path}: {error}"))?;
+    Ok(())
+}
+
 struct Cell {
     key: String,
     val: String,
@@ -762,6 +769,15 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+
+    #[test]
+    fn json_file_write_errors_are_returned() {
+        let path = std::env::temp_dir().join(format!(
+            "pingx-missing-json-directory-{}/result.json",
+            std::process::id()
+        ));
+        assert!(write_json_file(path.to_str().unwrap(), b"{}").is_err());
+    }
 
     #[test]
     fn test_stats_calculation() {
