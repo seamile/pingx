@@ -13,6 +13,7 @@ PingX is a practical network diagnostic CLI for **ICMP**, **half-open TCP SYN**,
 5. **JSON Output**: Export results to JSON for machine readability.
 6. **Interface Binding**: Bind all probes to a specific network interface (e.g., `en0`, `eth0`, `utun1`).
 7. **Traceroute**: Trace ICMP, UDP, or half-open TCP paths with per-hop RTTs and multiple responding nodes.
+8. **macOS Helper**: Run privileged probes through a root-owned launchd helper without starting PingX as root.
 
 ## Installation
 
@@ -33,6 +34,18 @@ sudo setcap cap_net_raw+ep $(which pingx)
 ```
 
 **Note**: The permissions will be lost if you reinstall or recompile pingx. You'll need to run the command again.
+
+### macOS Privileged Helper
+
+`cargo install pingx` does not elevate the program. On the first interactive privileged probe, PingX offers to install or update a root-owned helper. You can also manage it directly:
+
+```shell
+pingx helper install
+pingx helper status
+pingx helper uninstall
+```
+
+The helper runs on demand through launchd and is authorized for the UID that installed it. Other processes with the same UID can use its network-probe interface. Only installation, update, and removal ask for administrator approval. Running PingX as root uses the local probe implementation directly. HTTP requests, GeoIP downloads, and helper installation remain in the normal user process. A protocol mismatch or a helper installed for another UID prompts you to reinstall it.
 
 ### Windows Requirements
 
@@ -102,7 +115,7 @@ pingx -I en0 223.5.5.5
 pingx --interface utun1 223.5.5.5:443
 ```
 
-**Note**: Interface binding is implemented on Unix. On Linux, ICMP/TCP binding uses `SO_BINDTODEVICE`; HTTP uses source-address binding as a best-effort fallback. macOS traceroute still requires RAW privileges. Windows does not support `-I` in this release.
+**Note**: Interface binding is implemented on Unix. On Linux, ICMP/TCP binding uses `SO_BINDTODEVICE`; HTTP uses source-address binding as a best-effort fallback. On macOS, privileged probes pass the selected interface to the helper. Windows does not support `-I` in this release.
 
 ### Concurrent Probing
 
@@ -136,7 +149,7 @@ Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP
 
 Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. Each displayed RTT is the average of matching replies, and a fully unanswered hop shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size for ICMP and UDP.
 
-On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads ICMP errors from the socket error queue and does not require RAW privileges. On macOS, all traceroute modes require root/RAW privileges. On Windows, all traceroute modes require an Administrator terminal and the WinDivert runtime beside `pingx.exe`. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
+On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads ICMP errors from the socket error queue and does not require RAW privileges. On macOS, traceroute modes use a privileged RAW socket; a normal user reaches it through the installed helper. On Windows, all traceroute modes require an Administrator terminal and the WinDivert runtime beside `pingx.exe`. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
 
 ### Response Semantics
 
@@ -203,6 +216,7 @@ PingX 是一款实用的网络诊断命令行工具，支持 **ICMP**、**半开
 5. **JSON 输出**: 支持将探测或定位结果以 JSON 格式输出，方便集成。
 6. **网卡绑定**: 将探测流量绑定到指定网络接口（如 `en0`、`eth0`、`utun1`）。
 7. **路由追踪**: 追踪 ICMP、UDP 或半开 TCP 路径，并按跳显示 RTT 和多个响应节点。
+8. **macOS Helper**：通过 root 所有的 launchd helper 执行特权探测，无需以 root 启动 PingX。
 
 ## 安装
 
@@ -223,6 +237,18 @@ sudo setcap cap_net_raw+ep $(which pingx)
 ```
 
 **注意**：如果重新安装或重新编译 pingx，权限将会丢失，需要重新运行上述命令。
+
+### macOS 特权 Helper
+
+`cargo install pingx` 不会提权。首次在交互终端执行需要特权的探测时，PingX 会提示安装或更新 root 所有的 helper。也可以直接管理：
+
+```shell
+pingx helper install
+pingx helper status
+pingx helper uninstall
+```
+
+helper 由 launchd 按需启动，仅授权安装它的 UID 使用；同一 UID 的其他进程也可以调用其网络探测接口。只有安装、更新和卸载会请求管理员授权。以 root 运行 PingX 时直接使用本地探测实现。HTTP 请求、GeoIP 下载和 helper 安装仍由普通用户进程处理。协议版本不兼容或 helper 属于其他 UID 时，会提示重新安装。
 
 ### Windows 运行依赖
 
@@ -293,7 +319,7 @@ pingx -I en0 223.5.5.5
 pingx --interface utun1 223.5.5.5:443
 ```
 
-**注意**：网卡绑定目前实现于 Unix。Linux 的 ICMP/TCP 通过 `SO_BINDTODEVICE` 绑定，HTTP 通过源地址绑定作为尽力而为的回退方案。macOS 路由追踪仍需要 RAW 权限。Windows 当前版本不支持 `-I`。
+**注意**：网卡绑定目前实现于 Unix。Linux 的 ICMP/TCP 通过 `SO_BINDTODEVICE` 绑定，HTTP 通过源地址绑定作为尽力而为的回退方案。macOS 的特权探测会把指定网卡传给 helper。Windows 当前版本不支持 `-I`。
 
 ### 并发探测
 
@@ -325,7 +351,7 @@ pingx -R -U 1.1.1.1:33434
 
 每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。每个显示值是对应响应的平均 RTT；整跳无响应时在 IP 和 RTT 列显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 ICMP/UDP 的 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40/60 字节。TCP 路由追踪包长固定，显式传入其他值会报错。
 
-Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错误队列读取 ICMP 错误，不需要 RAW 权限。macOS 的所有路由追踪模式需要 root/RAW 权限。Windows 的所有路由追踪模式需要管理员终端，并将 WinDivert 运行文件放在 `pingx.exe` 同目录。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
+Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错误队列读取 ICMP 错误，不需要 RAW 权限。macOS 的路由追踪使用特权 RAW socket，普通用户通过已安装的 helper 使用。Windows 的所有路由追踪模式需要管理员终端，并将 WinDivert 运行文件放在 `pingx.exe` 同目录。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
 
 ### 响应语义
 

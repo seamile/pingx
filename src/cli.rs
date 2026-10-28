@@ -9,7 +9,7 @@ pub use crate::probe::{Protocol, ProtocolMode, TargetSpec};
     version,
     about = "A versatile network diagnostic tool to replace system ping/ping6.",
     long_about = None,
-    after_help = "TCP probes send a half-open SYN; SYN-ACK means open and RST means closed. Closed or rejected TCP/UDP ports count as received responses. Unix TCP and macOS UDP traceroute require RAW privileges; Windows UDP/TCP Ping and traceroute require Administrator access and WinDivert.dll plus WinDivert64.sys beside pingx.exe."
+    after_help = "TCP probes send a half-open SYN; SYN-ACK means open and RST means closed. Closed or rejected TCP/UDP ports count as received responses. macOS privileged probes use the root-owned launchd helper after `pingx helper install`. Windows UDP/TCP Ping and traceroute require Administrator access and WinDivert.dll plus WinDivert64.sys beside pingx.exe."
 )]
 pub struct Cli {
     /// Targets. In traceroute mode: HOST[:PORT] [PACKET_LEN]; use [IPv6]:PORT for IPv6 ports.
