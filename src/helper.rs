@@ -1185,7 +1185,7 @@ mod macos {
     <dict>
       <key>SockPathName</key><string>{SOCKET_PATH}</string>
       <key>SockPathOwner</key><integer>{allowed_uid}</integer>
-      <key>SockPathMode</key><integer>438</integer>
+      <key>SockPathMode</key><integer>384</integer>
     </dict>
   </dict>
   <key>Umask</key><integer>18</integer>
@@ -1279,7 +1279,7 @@ mod macos {
             assert!(plist.contains(SOCKET_PATH));
             assert!(plist.contains(super::super::INTERNAL_DAEMON_ARG));
             assert!(plist.contains("<key>SockPathOwner</key><integer>501</integer>"));
-            assert!(plist.contains("<key>SockPathMode</key><integer>438</integer>"));
+            assert!(plist.contains("<key>SockPathMode</key><integer>384</integer>"));
         }
 
         #[test]
