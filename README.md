@@ -47,6 +47,8 @@ pingx helper uninstall
 
 The helper runs on demand through launchd and is authorized for the UID that installed it. Other processes with the same UID can use its network-probe interface. Only installation, update, and removal ask for administrator approval. Running PingX as root uses the local probe implementation directly. HTTP requests, GeoIP downloads, and helper installation remain in the normal user process. A protocol mismatch or a helper installed for another UID prompts you to reinstall it.
 
+On macOS, HTTP targets and targets that require the privileged helper must be run in separate commands because HTTP requests never run inside the helper.
+
 ### Windows Requirements
 
 The Windows release ZIP already includes the required WinDivert 2.2.2 x64 runtime. For a `cargo install` build, follow [docs/WINDIVERT.md](docs/WINDIVERT.md): download the pinned official archive, verify its SHA-256, and place `WinDivert.dll` and `WinDivert64.sys` beside `pingx.exe`.
@@ -249,6 +251,8 @@ pingx helper uninstall
 ```
 
 helper 由 launchd 按需启动，仅授权安装它的 UID 使用；同一 UID 的其他进程也可以调用其网络探测接口。只有安装、更新和卸载会请求管理员授权。以 root 运行 PingX 时直接使用本地探测实现。HTTP 请求、GeoIP 下载和 helper 安装仍由普通用户进程处理。协议版本不兼容或 helper 属于其他 UID 时，会提示重新安装。
+
+在 macOS 上，HTTP 目标与需要特权 helper 的目标必须分开执行，因为 HTTP 请求不会在 helper 中运行。
 
 ### Windows 运行依赖
 
