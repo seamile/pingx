@@ -761,17 +761,64 @@ mod macos {
         stage_install(&mut staged, Path::new(STATE_PATH), 0o644, |output| {
             output.write_all(&state)
         })?;
-        commit_install(&mut staged)?;
+        let service_was_loaded = stop_helper_service()?;
+        activate_install(&mut staged, service_was_loaded, start_helper_service)?;
+        println!("PingX helper installed for UID {allowed_uid}");
+        Ok(())
+    }
 
-        let _ = Command::new("launchctl")
-            .args(["bootout", &format!("system/{LABEL}")])
-            .status();
+    fn activate_install<F>(
+        staged: &mut [StagedInstall],
+        service_was_loaded: bool,
+        mut start_service: F,
+    ) -> Result<()>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        if let Err(error) = commit_install(staged) {
+            restore_helper_service(service_was_loaded)?;
+            return Err(error);
+        }
+        if let Err(error) = start_service() {
+            rollback_install(staged);
+            restore_helper_service(service_was_loaded)
+                .context("restore the previous helper service")?;
+            return Err(error);
+        }
+        finalize_install(staged)
+    }
+
+    fn stop_helper_service() -> Result<bool> {
+        let loaded = Command::new("launchctl")
+            .args(["print", &format!("system/{LABEL}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("query helper service")?
+            .success();
+        if loaded {
+            let status = Command::new("launchctl")
+                .args(["bootout", &format!("system/{LABEL}")])
+                .status()
+                .context("stop helper service")?;
+            anyhow::ensure!(status.success(), "launchctl could not stop {LABEL}");
+        }
+        Ok(loaded)
+    }
+
+    fn start_helper_service() -> Result<()> {
         let status = Command::new("launchctl")
             .args(["bootstrap", "system", PLIST_PATH])
             .status()
             .context("bootstrap helper service")?;
         anyhow::ensure!(status.success(), "launchctl could not load {LABEL}");
-        println!("PingX helper installed for UID {allowed_uid}");
+        Ok(())
+    }
+
+    fn restore_helper_service(was_loaded: bool) -> Result<()> {
+        if was_loaded {
+            start_helper_service()?;
+        }
         Ok(())
     }
 
@@ -1260,6 +1307,10 @@ mod macos {
                 return Err(error).with_context(|| format!("sync {}", target.display()));
             }
         }
+        Ok(())
+    }
+
+    fn finalize_install(staged: &mut [StagedInstall]) -> Result<()> {
         for item in staged {
             item.installed = false;
             if let Some(backup) = item.backup.take() {
@@ -1462,6 +1513,13 @@ mod macos {
                 .unwrap();
             }
             commit_install(&mut staged).unwrap();
+            assert!(
+                temporary_files(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+                    .iter()
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "old"))
+                    .all(|path| path.exists())
+            );
+            finalize_install(&mut staged).unwrap();
             for (index, path) in paths.iter().enumerate() {
                 assert_eq!(fs::read_to_string(path).unwrap(), format!("new {index}"));
             }
@@ -1522,6 +1580,40 @@ mod macos {
             assert!(!paths[0].exists());
             assert!(
                 temporary_files(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+                    .iter()
+                    .all(|path| !path.exists())
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn failed_service_start_restores_files_and_the_previous_service() {
+            let root = std::env::temp_dir().join(format!(
+                "pingx-helper-service-rollback-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let path = root.join("helper");
+            fs::write(&path, "old helper").unwrap();
+            let mut staged = Vec::new();
+            stage_install(&mut staged, &path, 0o644, |output| {
+                output.write_all(b"new helper")
+            })
+            .unwrap();
+
+            let mut restored_service = false;
+            assert!(
+                activate_install(&mut staged, true, || {
+                    restored_service = true;
+                    anyhow::bail!("service did not start")
+                })
+                .is_err()
+            );
+            assert!(restored_service);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "old helper");
+            assert!(
+                temporary_files(&[path.as_path()])
                     .iter()
                     .all(|path| !path.exists())
             );
