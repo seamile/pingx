@@ -104,7 +104,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 2;
+    const PROTOCOL_VERSION: u16 = 3;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -137,11 +137,12 @@ mod macos {
     enum ResponseResult {
         Status { allowed_uid: u32 },
         Output { stream: OutputStream, data: String },
+        TraceData { data: String },
         Exit { code: i32 },
         Error(String),
     }
 
-    #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+    #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
     enum OutputStream {
         Stdout,
         Stderr,
@@ -577,6 +578,9 @@ mod macos {
                                 output.flush()?;
                             }
                         },
+                        ResponseResult::TraceData { data } => {
+                            println!("{}", crate::traceroute::render_trace_data(&data).await?);
+                        }
                         ResponseResult::Exit { code } => {
                             if code == 0 && json_file_requested
                                 && let Some(path) = json_path.as_ref()
@@ -630,7 +634,9 @@ mod macos {
         }
         crate::utils::set_bind_interface(parsed.interface.clone());
         if traceroute {
-            crate::traceroute::TraceSession::new(parsed).run().await
+            crate::traceroute::TraceSession::new(parsed)
+                .run_helper_data()
+                .await
         } else if json_only {
             crate::session::Session::new(parsed).run_json_only().await
         } else {
@@ -912,6 +918,7 @@ mod macos {
         writer: &mut tokio::net::unix::OwnedWriteHalf,
     ) -> Result<Option<i32>> {
         validate_operation(&operation)?;
+        let traceroute = matches!(&operation, Operation::Trace(_));
         let current_exe = std::env::current_exe().context("resolve helper executable")?;
         let mut child = tokio::process::Command::new(current_exe)
             .arg(super::INTERNAL_WORKER_ARG)
@@ -976,7 +983,11 @@ mod macos {
                                 writer,
                                 &Response {
                                     protocol_version: PROTOCOL_VERSION,
-                                    result: ResponseResult::Output { stream, data },
+                                    result: if stream == OutputStream::Stdout && traceroute {
+                                        ResponseResult::TraceData { data }
+                                    } else {
+                                        ResponseResult::Output { stream, data }
+                                    },
                                 },
                             )
                             .await?;
@@ -1375,6 +1386,19 @@ mod macos {
                 .unwrap();
             assert!(line.len() > MAX_REQUEST);
             task.await.unwrap().unwrap();
+        }
+
+        #[test]
+        fn traceroute_stdout_is_returned_as_data() {
+            let response = ResponseResult::TraceData {
+                data: "{\"rows\":[]}".to_string(),
+            };
+            let encoded = serde_json::to_string(&response).unwrap();
+            assert!(encoded.contains("TraceData"));
+            assert!(matches!(
+                serde_json::from_str::<ResponseResult>(&encoded).unwrap(),
+                ResponseResult::TraceData { data } if data == "{\"rows\":[]}"
+            ));
         }
 
         #[tokio::test]

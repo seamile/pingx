@@ -1,5 +1,38 @@
 use crate::cli::Cli;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceOutput {
+    Human,
+    #[cfg(target_os = "macos")]
+    HelperData,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TraceData {
+    target_name: String,
+    target: std::net::IpAddr,
+    max_hops: u8,
+    size: usize,
+    rows: Vec<TraceDataRow>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TraceDataRow {
+    ttl: u8,
+    nodes: Vec<TraceDataNode>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TraceDataNode {
+    ip: std::net::IpAddr,
+    rtt_ns: u64,
+    error: Option<u8>,
+}
 
 pub struct TraceSession {
     cli: Cli,
@@ -11,12 +44,22 @@ impl TraceSession {
     }
 
     pub async fn run(&self) -> Result<()> {
-        run_trace(self.cli.clone()).await
+        run_trace(self.cli.clone(), TraceOutput::Human).await
+    }
+
+    #[cfg(target_os = "macos")]
+    pub async fn run_helper_data(&self) -> Result<()> {
+        run_trace(self.cli.clone(), TraceOutput::HelperData).await
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) async fn render_trace_data(data: &str) -> Result<String> {
+    platform::render_trace_data(data).await
+}
+
 #[cfg(not(any(unix, windows)))]
-async fn run_trace(_cli: Cli) -> Result<()> {
+async fn run_trace(_cli: Cli, _output: TraceOutput) -> Result<()> {
     Err(anyhow::anyhow!(
         "traceroute mode is not supported on this platform"
     ))
@@ -119,6 +162,61 @@ mod platform {
         error: Option<u8>,
     }
 
+    #[cfg(target_os = "macos")]
+    impl TraceData {
+        fn from_rows(
+            target_name: String,
+            target: IpAddr,
+            max_hops: u8,
+            size: usize,
+            rows: &[Row],
+        ) -> Self {
+            Self {
+                target_name,
+                target,
+                max_hops,
+                size,
+                rows: rows
+                    .iter()
+                    .map(|row| TraceDataRow {
+                        ttl: row.ttl,
+                        nodes: row
+                            .nodes
+                            .iter()
+                            .map(|node| TraceDataNode {
+                                ip: node.ip,
+                                rtt_ns: (node.rtts.iter().sum::<Duration>()
+                                    / node.rtts.len() as u32)
+                                    .as_nanos()
+                                    .min(u64::MAX as u128)
+                                    as u64,
+                                error: node.error,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        }
+
+        fn into_rows(self) -> Vec<Row> {
+            self.rows
+                .into_iter()
+                .map(|row| Row {
+                    ttl: row.ttl,
+                    nodes: row
+                        .nodes
+                        .into_iter()
+                        .map(|node| Node {
+                            ip: node.ip,
+                            rtts: vec![Duration::from_nanos(node.rtt_ns)],
+                            error: node.error,
+                        })
+                        .collect(),
+                })
+                .collect()
+        }
+    }
+
     struct ProbeRun {
         probes: HashMap<u16, Probe>,
         stop_hop: Option<u8>,
@@ -150,7 +248,7 @@ mod platform {
         Tcp(Vec<u8>, u16, u32),
     }
 
-    pub(super) async fn run_trace(cli: Cli) -> Result<()> {
+    pub(super) async fn run_trace(cli: Cli, output: TraceOutput) -> Result<()> {
         let spec = cli.trace_target()?;
         let (protocol, trace_port) = match spec.protocol {
             ProbeProtocol::Icmp => (TraceProtocol::Icmp, 33434),
@@ -188,10 +286,12 @@ mod platform {
         let local = crate::probe::tcp_syn::local_address_for(target)?;
         let socket = Arc::new(TraceSocket::new(local, target, protocol, trace_port)?);
 
-        println!(
-            "{}",
-            styled_trace_header(&spec.host, target, max_hops, size)
-        );
+        if output == TraceOutput::Human {
+            println!(
+                "{}",
+                styled_trace_header(&spec.host, target, max_hops, size)
+            );
+        }
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);
         let tcp_seed = crate::probe::tcp_syn::next_sequence();
@@ -224,11 +324,17 @@ mod platform {
         .await;
         receiver.abort();
         let result = result?;
-        render(&collect_rows(
-            result.probes,
-            result.stop_hop.unwrap_or(result.max_sent),
-        ))
-        .await;
+        let rows = collect_rows(result.probes, result.stop_hop.unwrap_or(result.max_sent));
+        match output {
+            TraceOutput::Human => render(&rows).await,
+            #[cfg(target_os = "macos")]
+            TraceOutput::HelperData => println!(
+                "{}",
+                serde_json::to_string(&TraceData::from_rows(
+                    spec.host, target, max_hops, size, &rows,
+                ))?
+            ),
+        }
         match (result.stop_hop, result.terminal_error) {
             (_, Some(code)) => anyhow::bail!("target is unreachable (ICMP error {})", code),
             (Some(_), None) => Ok(()),
@@ -2011,6 +2117,29 @@ mod platform {
         println!("{}", render_rows(rows, geo.as_ref()));
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) async fn render_trace_data(data: &str) -> Result<String> {
+        let data: TraceData = serde_json::from_str(data)?;
+        let rows = data.clone().into_rows();
+        let geo = match GeoIpManager::new() {
+            Ok(manager) => Some(manager),
+            Err(error) => {
+                eprintln!("pingx: GeoIP unavailable: {error}");
+                None
+            }
+        };
+        if geo.as_ref().is_none_or(|geo| !geo.has_databases()) {
+            eprintln!(
+                "pingx: GeoIP database is unavailable; locations are shown as '-'. Run `pingx --fetch-geo` to configure it."
+            );
+        }
+        Ok(format!(
+            "{}\n{}",
+            styled_trace_header(&data.target_name, data.target, data.max_hops, data.size),
+            render_rows(&rows, geo.as_ref())
+        ))
+    }
+
     fn render_rows(rows: &[Row], geo: Option<&GeoIpManager>) -> String {
         let mut cells = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2978,6 +3107,43 @@ mod platform {
             let columns: Vec<_> = lines[2].split('|').map(str::trim).collect();
             assert_eq!(columns[1], "*");
             assert_eq!(columns[3], "*");
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn helper_trace_data_preserves_hop_nodes_and_rtt() {
+            let rows = vec![Row {
+                ttl: 2,
+                nodes: vec![
+                    Node {
+                        ip: "192.0.2.1".parse().unwrap(),
+                        rtts: vec![Duration::from_millis(3), Duration::from_millis(5)],
+                        error: None,
+                    },
+                    Node {
+                        ip: "192.0.2.2".parse().unwrap(),
+                        rtts: vec![Duration::from_millis(7)],
+                        error: Some(3),
+                    },
+                ],
+            }];
+            let encoded = serde_json::to_string(&TraceData::from_rows(
+                "example.com".to_string(),
+                "198.51.100.1".parse().unwrap(),
+                64,
+                40,
+                &rows,
+            ))
+            .unwrap();
+            let decoded: TraceData = serde_json::from_str(&encoded).unwrap();
+            let decoded = decoded.into_rows();
+            assert_eq!(decoded[0].ttl, 2);
+            assert_eq!(
+                decoded[0].nodes[0].ip,
+                "192.0.2.1".parse::<IpAddr>().unwrap()
+            );
+            assert_eq!(decoded[0].nodes[0].rtts, [Duration::from_millis(4)]);
+            assert_eq!(decoded[0].nodes[1].error, Some(3));
         }
 
         #[test]
