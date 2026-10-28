@@ -167,13 +167,20 @@ async fn probe_udp(addr: IpAddr, port: u16) -> Result<()> {
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::probe::udp_windows::probe(addr, port, 0, PROBE_TIMEOUT, 64)
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         probe_udp_socket(addr, port).await
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn probe_udp_socket(addr: IpAddr, port: u16) -> Result<()> {
     let socket = tokio::net::UdpSocket::bind(if addr.is_ipv6() {
         "[::]:0"
@@ -200,7 +207,14 @@ async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::probe::tcp_syn::probe_windows(addr, port, PROBE_TIMEOUT, 64)
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (addr, port);
         Err(anyhow::anyhow!(
