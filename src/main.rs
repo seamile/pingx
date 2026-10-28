@@ -76,6 +76,14 @@ async fn main() {
             eprintln!("pingx: traceroute output cannot be quiet");
             std::process::exit(2);
         }
+        match helper::run_if_needed(&args).await {
+            Ok(Some(code)) => std::process::exit(code),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("pingx: {error:#}");
+                std::process::exit(1);
+            }
+        }
         if let Err(e) = utils::check_and_acquire_privileges(&args).await {
             eprintln!("pingx: {}", e);
             std::process::exit(1);
@@ -164,6 +172,15 @@ async fn main() {
         }
 
         return;
+    }
+
+    match helper::run_if_needed(&args).await {
+        Ok(Some(code)) => std::process::exit(code),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("pingx: {error:#}");
+            std::process::exit(1);
+        }
     }
 
     if let Err(e) = utils::check_and_acquire_privileges(&args).await {

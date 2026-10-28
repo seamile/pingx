@@ -4,6 +4,7 @@ use std::ffi::OsString;
 pub const INTERNAL_DAEMON_ARG: &str = "--internal-helper-daemon";
 pub const INTERNAL_INSTALL_ARG: &str = "--internal-helper-install";
 pub const INTERNAL_UNINSTALL_ARG: &str = "--internal-helper-uninstall";
+pub const INTERNAL_WORKER_ARG: &str = "--internal-helper-worker";
 
 pub async fn run_internal(args: &[OsString]) -> Result<Option<i32>> {
     let Some(command) = args.first().and_then(|arg| arg.to_str()) else {
@@ -43,6 +44,17 @@ pub async fn run_internal(args: &[OsString]) -> Result<Option<i32>> {
                 anyhow::bail!("the privileged helper is only supported on macOS")
             }
         }
+        INTERNAL_WORKER_ARG => {
+            #[cfg(target_os = "macos")]
+            {
+                macos::run_worker().await?;
+                Ok(Some(0))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                anyhow::bail!("the privileged helper is only supported on macOS")
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -59,19 +71,31 @@ pub async fn run_command(args: &[OsString]) -> Result<()> {
     }
 }
 
+pub async fn run_if_needed(_cli: &crate::cli::Cli) -> Result<Option<i32>> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos::run_if_needed(_cli).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::cli::Cli;
     use anyhow::{Context, Result};
     use serde::{Deserialize, Serialize};
     use std::ffi::{CString, OsString};
     use std::fs::{self, File, OpenOptions};
-    use std::io::{self, IsTerminal, Write};
+    use std::io::{self, IsTerminal, Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
 
     const LABEL: &str = "com.seamile.pingx.helper";
@@ -80,8 +104,10 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 1;
-    const MAX_FRAME: usize = 64 * 1024;
+    const PROTOCOL_VERSION: u16 = 2;
+    const MAX_REQUEST: usize = 1024 * 1024;
+    const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+    const MAX_CONTROL: usize = 4 * 1024;
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct HelperState {
@@ -98,6 +124,7 @@ mod macos {
     #[derive(Debug, Deserialize, Serialize)]
     enum Action {
         Status,
+        Run(Operation),
     }
 
     #[derive(Debug, Deserialize, Serialize)]
@@ -109,7 +136,271 @@ mod macos {
     #[derive(Debug, Deserialize, Serialize)]
     enum ResponseResult {
         Status { allowed_uid: u32 },
+        Output { stream: OutputStream, data: String },
+        Exit { code: i32 },
         Error(String),
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+    enum OutputStream {
+        Stdout,
+        Stderr,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    enum Operation {
+        Ping(PingOperation),
+        Trace(TraceOperation),
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct PingOperation {
+        targets: Vec<String>,
+        count: Option<u64>,
+        interval_ns: u64,
+        timeout_ns: u64,
+        deadline_ns: Option<u64>,
+        ttl: u32,
+        size: usize,
+        quiet: bool,
+        interface: Option<String>,
+        ipv4: bool,
+        ipv6: bool,
+        tcp: bool,
+        udp: bool,
+        json: bool,
+        json_file: bool,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct TraceOperation {
+        target: String,
+        packet_len: Option<String>,
+        timeout_ns: u64,
+        interface: Option<String>,
+        ipv4: bool,
+        ipv6: bool,
+        tcp: bool,
+        udp: bool,
+        max_hops: u8,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    enum ClientControl {
+        Cancel,
+    }
+
+    pub(super) async fn run_if_needed(cli: &Cli) -> Result<Option<i32>> {
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(None);
+        }
+        let operation = operation_from_cli(cli)?;
+        let Some(operation) = operation else {
+            return Ok(None);
+        };
+        ensure_helper_ready().await?;
+        let json_path = cli
+            .json
+            .as_ref()
+            .and_then(|value| value.as_ref())
+            .map(PathBuf::from);
+        let code = run_client(operation, json_path).await?;
+        Ok(Some(code))
+    }
+
+    fn operation_from_cli(cli: &Cli) -> Result<Option<Operation>> {
+        if cli.fetch_geo || cli.geo {
+            return Ok(None);
+        }
+        if cli.traceroute {
+            let target = cli
+                .targets
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("traceroute requires a target"))?;
+            return Ok(Some(Operation::Trace(TraceOperation {
+                target: target.clone(),
+                packet_len: cli.targets.get(1).cloned(),
+                timeout_ns: duration_ns(cli.timeout)?,
+                interface: cli.interface.clone(),
+                ipv4: cli.ipv4,
+                ipv6: cli.ipv6,
+                tcp: cli.tcp,
+                udp: cli.udp,
+                max_hops: cli.max_hops,
+            })));
+        }
+
+        let mut privileged = Vec::new();
+        let mut http = 0usize;
+        for target in &cli.targets {
+            match cli.target_spec(target)?.protocol {
+                crate::cli::Protocol::Http(_) => http += 1,
+                _ => privileged.push(target.clone()),
+            }
+        }
+        if privileged.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            http == 0,
+            "HTTP and privileged probes cannot be combined in one helper request; run them separately"
+        );
+        Ok(Some(Operation::Ping(PingOperation {
+            targets: privileged,
+            count: cli.count,
+            interval_ns: duration_ns(cli.interval)?,
+            timeout_ns: duration_ns(cli.timeout)?,
+            deadline_ns: cli.deadline.map(duration_ns).transpose()?,
+            ttl: cli.ttl,
+            size: cli.size,
+            quiet: cli.quiet,
+            interface: cli.interface.clone(),
+            ipv4: cli.ipv4,
+            ipv6: cli.ipv6,
+            tcp: cli.tcp,
+            udp: cli.udp,
+            json: cli.json.is_some(),
+            json_file: cli.json.as_ref().is_some_and(Option::is_some),
+        })))
+    }
+
+    fn duration_ns(duration: Duration) -> Result<u64> {
+        u64::try_from(duration.as_nanos()).context("duration is too large for the helper protocol")
+    }
+
+    fn validate_operation(operation: &Operation) -> Result<()> {
+        match operation {
+            Operation::Ping(ping) => {
+                anyhow::ensure!(
+                    (1..=1024).contains(&ping.targets.len()),
+                    "helper request must contain 1 to 1024 targets"
+                );
+                anyhow::ensure!(!ping.tcp || !ping.udp, "TCP and UDP modes conflict");
+                anyhow::ensure!((1..=255).contains(&ping.ttl), "TTL must be 1..=255");
+                anyhow::ensure!(ping.size <= u16::MAX as usize, "packet size is too large");
+                anyhow::ensure!(ping.interval_ns > 0, "interval must be positive");
+                anyhow::ensure!(ping.timeout_ns > 0, "timeout must be positive");
+                anyhow::ensure!(
+                    ping.deadline_ns.is_none_or(|deadline| deadline > 0),
+                    "deadline must be positive"
+                );
+                anyhow::ensure!(
+                    ping.count
+                        .is_none_or(|count| (1..=10_000_000).contains(&count)),
+                    "count is outside the helper limit"
+                );
+                validate_interface(ping.interface.as_deref())?;
+                let cli = ping.to_cli();
+                for target in &ping.targets {
+                    anyhow::ensure!(target.len() <= 1024, "target name is too long");
+                    anyhow::ensure!(
+                        !matches!(
+                            cli.target_spec(target)?.protocol,
+                            crate::cli::Protocol::Http(_)
+                        ),
+                        "HTTP targets do not use the privileged helper"
+                    );
+                }
+            }
+            Operation::Trace(trace) => {
+                anyhow::ensure!(trace.target.len() <= 1024, "target name is too long");
+                anyhow::ensure!(!trace.tcp || !trace.udp, "TCP and UDP modes conflict");
+                anyhow::ensure!(trace.timeout_ns > 0, "timeout must be positive");
+                anyhow::ensure!(
+                    (1..=255).contains(&trace.max_hops),
+                    "max hops must be 1..=255"
+                );
+                if let Some(size) = trace.packet_len.as_deref() {
+                    let size = size
+                        .parse::<usize>()
+                        .context("traceroute packet size must be an integer")?;
+                    anyhow::ensure!(
+                        (1..=u16::MAX as usize).contains(&size),
+                        "invalid packet size"
+                    );
+                }
+                validate_interface(trace.interface.as_deref())?;
+                let cli = trace.to_cli();
+                anyhow::ensure!(
+                    !matches!(cli.trace_target()?.protocol, crate::cli::Protocol::Http(_)),
+                    "HTTP traceroute is not supported"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_interface(interface: Option<&str>) -> Result<()> {
+        if let Some(interface) = interface {
+            anyhow::ensure!(
+                !interface.is_empty()
+                    && interface.len() <= 64
+                    && interface
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte)),
+                "invalid interface name"
+            );
+        }
+        Ok(())
+    }
+
+    impl PingOperation {
+        fn to_cli(&self) -> Cli {
+            Cli {
+                targets: self.targets.clone(),
+                count: self.count,
+                interval: Duration::from_nanos(self.interval_ns),
+                timeout: Duration::from_nanos(self.timeout_ns),
+                deadline: self.deadline_ns.map(Duration::from_nanos),
+                ttl: self.ttl,
+                size: self.size,
+                quiet: self.quiet,
+                interface: self.interface.clone(),
+                ipv4: self.ipv4,
+                ipv6: self.ipv6,
+                tcp: self.tcp,
+                udp: self.udp,
+                http: false,
+                headers: Vec::new(),
+                geo: false,
+                fetch_geo: false,
+                // The root worker must never write to a caller-selected path.
+                json: self.json.then_some(None),
+                traceroute: false,
+                max_hops: 64,
+            }
+        }
+    }
+
+    impl TraceOperation {
+        fn to_cli(&self) -> Cli {
+            let mut targets = vec![self.target.clone()];
+            if let Some(packet_len) = &self.packet_len {
+                targets.push(packet_len.clone());
+            }
+            Cli {
+                targets,
+                count: None,
+                interval: Duration::from_secs(1),
+                timeout: Duration::from_nanos(self.timeout_ns),
+                deadline: None,
+                ttl: 64,
+                size: 56,
+                quiet: false,
+                interface: self.interface.clone(),
+                ipv4: self.ipv4,
+                ipv6: self.ipv6,
+                tcp: self.tcp,
+                udp: self.udp,
+                http: false,
+                headers: Vec::new(),
+                geo: false,
+                fetch_geo: false,
+                json: None,
+                traceroute: true,
+                max_hops: self.max_hops,
+            }
+        }
     }
 
     pub(super) async fn run_command(args: &[OsString]) -> Result<()> {
@@ -123,6 +414,189 @@ mod macos {
             "uninstall" => uninstall_as_user(),
             _ => anyhow::bail!("usage: pingx helper <install|status|uninstall>"),
         }
+    }
+
+    async fn ensure_helper_ready() -> Result<()> {
+        let uid = unsafe { libc::geteuid() } as u32;
+        for attempt in 0..2 {
+            let result = async {
+                let state = read_state()?;
+                anyhow::ensure!(
+                    state.protocol_version == PROTOCOL_VERSION,
+                    "helper protocol is {} but this client expects {PROTOCOL_VERSION}",
+                    state.protocol_version
+                );
+                anyhow::ensure!(
+                    state.allowed_uid == uid,
+                    "helper is authorized for UID {} instead of {uid}",
+                    state.allowed_uid
+                );
+                let response = send_request(Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    action: Action::Status,
+                })
+                .await?;
+                anyhow::ensure!(
+                    response.protocol_version == PROTOCOL_VERSION,
+                    "helper protocol changed while checking availability"
+                );
+                match response.result {
+                    ResponseResult::Status { allowed_uid } if allowed_uid == uid => Ok(()),
+                    ResponseResult::Status { allowed_uid } => Err(anyhow::anyhow!(
+                        "helper authorized UID {allowed_uid} instead of {uid}"
+                    )),
+                    ResponseResult::Error(error) => Err(anyhow::anyhow!(error)),
+                    _ => Err(anyhow::anyhow!("unexpected helper status response")),
+                }
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt == 0 => {
+                    offer_helper_install(&error)?;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(error) => return Err(error).context("PingX helper is unavailable"),
+            }
+        }
+        unreachable!()
+    }
+
+    fn offer_helper_install(reason: &anyhow::Error) -> Result<()> {
+        let command = "pingx helper install";
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            anyhow::bail!(
+                "{reason:#}; privileged probes need the PingX helper. Run `{command}` from an interactive terminal"
+            );
+        }
+        eprintln!("pingx: {reason:#}");
+        eprintln!("Privileged probes need a root-owned PingX helper.");
+        print!("Install or update it now with administrator approval? [Y/n]: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        anyhow::ensure!(
+            matches!(
+                answer.trim().to_ascii_lowercase().as_str(),
+                "" | "y" | "yes"
+            ),
+            "PingX helper installation cancelled"
+        );
+        install_as_user()
+    }
+
+    async fn run_client(operation: Operation, json_path: Option<PathBuf>) -> Result<i32> {
+        validate_operation(&operation)?;
+        let json_file_requested = matches!(
+            &operation,
+            Operation::Ping(PingOperation {
+                json_file: true,
+                ..
+            })
+        );
+        anyhow::ensure!(
+            !json_file_requested || json_path.is_some(),
+            "helper JSON file path is missing"
+        );
+        let stream = UnixStream::connect(SOCKET_PATH)
+            .await
+            .context("connect to PingX helper")?;
+        let (reader, mut writer) = stream.into_split();
+        write_frame(
+            &mut writer,
+            &Request {
+                protocol_version: PROTOCOL_VERSION,
+                action: Action::Run(operation),
+            },
+        )
+        .await?;
+        let mut reader = BufReader::new(reader);
+        let mut json_data = String::new();
+        loop {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    let _ = write_frame(&mut writer, &ClientControl::Cancel).await;
+                    return Ok(130);
+                }
+                response = read_frame::<Response>(&mut reader, MAX_RESPONSE) => {
+                    let Some(response) = response? else {
+                        anyhow::bail!("PingX helper closed the connection before reporting completion");
+                    };
+                    anyhow::ensure!(
+                        response.protocol_version == PROTOCOL_VERSION,
+                        "helper protocol changed while the operation was running"
+                    );
+                    match response.result {
+                        ResponseResult::Output { stream, data } => match stream {
+                            OutputStream::Stdout => {
+                                if json_file_requested {
+                                    json_data.push_str(&data);
+                                    json_data.push('\n');
+                                } else {
+                                    let mut output = io::stdout().lock();
+                                    writeln!(output, "{data}")?;
+                                    output.flush()?;
+                                }
+                            }
+                            OutputStream::Stderr => {
+                                let mut output = io::stderr().lock();
+                                writeln!(output, "{data}")?;
+                                output.flush()?;
+                            }
+                        },
+                        ResponseResult::Exit { code } => {
+                            if code == 0 && json_file_requested
+                                && let Some(path) = json_path.as_ref()
+                            {
+                                fs::write(path, json_data.as_bytes())
+                                    .with_context(|| format!("write JSON to {}", path.display()))?;
+                            }
+                            return Ok(code);
+                        }
+                        ResponseResult::Error(error) => anyhow::bail!("{error}"),
+                        ResponseResult::Status { .. } => {
+                            anyhow::bail!("unexpected status response during probe operation");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) async fn run_worker() -> Result<()> {
+        let mut data = Vec::new();
+        io::stdin()
+            .lock()
+            .take((MAX_REQUEST + 1) as u64)
+            .read_to_end(&mut data)?;
+        anyhow::ensure!(data.len() <= MAX_REQUEST, "helper request is too large");
+        let operation: Operation = serde_json::from_slice(&data)?;
+        validate_operation(&operation)?;
+        let CliWithMode {
+            cli: parsed,
+            traceroute,
+        } = match operation {
+            Operation::Ping(ping) => CliWithMode {
+                cli: ping.to_cli(),
+                traceroute: false,
+            },
+            Operation::Trace(trace) => CliWithMode {
+                cli: trace.to_cli(),
+                traceroute: true,
+            },
+        };
+        crate::utils::set_bind_interface(parsed.interface.clone());
+        if traceroute {
+            crate::traceroute::TraceSession::new(parsed).run().await
+        } else {
+            crate::session::Session::new(parsed).run().await
+        }
+    }
+
+    struct CliWithMode {
+        cli: Cli,
+        traceroute: bool,
     }
 
     fn install_as_user() -> Result<()> {
@@ -291,6 +765,10 @@ mod macos {
             action: Action::Status,
         })
         .await?;
+        anyhow::ensure!(
+            response.protocol_version == PROTOCOL_VERSION,
+            "helper protocol changed while checking status"
+        );
         match response.result {
             ResponseResult::Status { allowed_uid } => {
                 println!("PingX helper: installed");
@@ -300,6 +778,7 @@ mod macos {
                 Ok(())
             }
             ResponseResult::Error(error) => Err(anyhow::anyhow!("helper error: {error}")),
+            _ => Err(anyhow::anyhow!("unexpected helper status response")),
         }
     }
 
@@ -315,16 +794,24 @@ mod macos {
             state.protocol_version
         );
         let listener = activated_listener()?;
+        let mut sessions = tokio::task::JoinSet::new();
         loop {
+            while let Some(result) = sessions.try_join_next() {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("pingx-helper: {error:#}"),
+                    Err(error) => eprintln!("pingx-helper: session task failed: {error}"),
+                }
+            }
             let accepted = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
             match accepted {
                 Ok(Ok((stream, _))) => {
-                    if let Err(error) = handle_connection(stream, &state).await {
-                        eprintln!("pingx-helper: {error:#}");
-                    }
+                    let state = state.clone();
+                    sessions.spawn(async move { handle_connection(stream, &state).await });
                 }
                 Ok(Err(error)) => return Err(error).context("accept helper connection"),
-                Err(_) => return Ok(()),
+                Err(_) if sessions.is_empty() => return Ok(()),
+                Err(_) => {}
             }
         }
     }
@@ -337,47 +824,206 @@ mod macos {
             credentials.uid()
         );
         let (reader, mut writer) = stream.into_split();
-        let request: Request = read_frame(reader).await?;
+        let mut reader = BufReader::new(reader);
+        let request: Request = read_frame(&mut reader, MAX_REQUEST).await?.ok_or_else(|| {
+            anyhow::anyhow!("helper connection closed before a request was received")
+        })?;
         anyhow::ensure!(
             request.protocol_version == PROTOCOL_VERSION,
             "protocol version mismatch"
         );
-        let response = match request.action {
-            Action::Status => Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: ResponseResult::Status {
-                    allowed_uid: state.allowed_uid,
-                },
-            },
-        };
-        write_frame(&mut writer, &response).await
+        match request.action {
+            Action::Status => {
+                write_frame(
+                    &mut writer,
+                    &Response {
+                        protocol_version: PROTOCOL_VERSION,
+                        result: ResponseResult::Status {
+                            allowed_uid: state.allowed_uid,
+                        },
+                    },
+                )
+                .await
+            }
+            Action::Run(operation) => {
+                let response = match run_operation(operation, &mut reader, &mut writer).await {
+                    Ok(Some(code)) => Response {
+                        protocol_version: PROTOCOL_VERSION,
+                        result: ResponseResult::Exit { code },
+                    },
+                    Ok(None) => return Ok(()),
+                    Err(error) => Response {
+                        protocol_version: PROTOCOL_VERSION,
+                        result: ResponseResult::Error(format!("{error:#}")),
+                    },
+                };
+                write_frame(&mut writer, &response).await
+            }
+        }
+    }
+
+    async fn run_operation(
+        operation: Operation,
+        client_reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+    ) -> Result<Option<i32>> {
+        validate_operation(&operation)?;
+        let current_exe = std::env::current_exe().context("resolve helper executable")?;
+        let mut child = tokio::process::Command::new(current_exe)
+            .arg(super::INTERNAL_WORKER_ARG)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("start probe worker")?;
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("probe worker stdin is unavailable"))?;
+        input
+            .write_all(&serde_json::to_vec(&operation)?)
+            .await
+            .context("write probe request")?;
+        input.shutdown().await.context("close probe request")?;
+        drop(input);
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("probe worker stdout is unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("probe worker stderr is unavailable"))?;
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(64);
+        let stdout_task = tokio::spawn(forward_output(
+            stdout,
+            OutputStream::Stdout,
+            output_tx.clone(),
+        ));
+        let stderr_task = tokio::spawn(forward_output(stderr, OutputStream::Stderr, output_tx));
+
+        let mut status = None;
+        let mut output_closed = false;
+        loop {
+            tokio::select! {
+                control = read_frame::<ClientControl>(client_reader, MAX_CONTROL), if status.is_none() => {
+                    match control? {
+                        Some(ClientControl::Cancel) => {
+                            terminate_child(&mut child).await;
+                            stdout_task.abort();
+                            stderr_task.abort();
+                            return Ok(Some(130));
+                        }
+                        None => {
+                            terminate_child(&mut child).await;
+                            stdout_task.abort();
+                            stderr_task.abort();
+                            return Ok(None);
+                        }
+                    }
+                }
+                output = output_rx.recv(), if !output_closed => {
+                    match output {
+                        Some(output) => {
+                            let (stream, data) = output?;
+                            write_frame(
+                                writer,
+                                &Response {
+                                    protocol_version: PROTOCOL_VERSION,
+                                    result: ResponseResult::Output { stream, data },
+                                },
+                            )
+                            .await?;
+                        }
+                        None => output_closed = true,
+                    }
+                }
+                child_status = child.wait(), if status.is_none() => {
+                    status = Some(child_status.context("wait for probe worker")?);
+                }
+            }
+            if output_closed && status.is_some() {
+                break;
+            }
+        }
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        Ok(Some(status.and_then(|status| status.code()).unwrap_or(1)))
+    }
+
+    async fn forward_output<R>(
+        reader: R,
+        stream: OutputStream,
+        output: tokio::sync::mpsc::Sender<Result<(OutputStream, String)>>,
+    ) where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut lines = BufReader::new(reader).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if output.send(Ok((stream, line))).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    let _ = output.send(Err(error.into())).await;
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn terminate_child(child: &mut tokio::process::Child) {
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.start_kill();
+        }
+        let _ = child.wait().await;
     }
 
     async fn send_request(request: Request) -> Result<Response> {
-        let stream = tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(SOCKET_PATH))
-            .await
-            .map_err(|_| anyhow::anyhow!("PingX helper did not respond"))??
-            .into_split();
-        let (reader, mut writer) = stream;
-        write_frame(&mut writer, &request).await?;
-        read_frame(reader).await
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let stream = UnixStream::connect(SOCKET_PATH)
+                .await
+                .context("connect to PingX helper")?;
+            let (reader, mut writer) = stream.into_split();
+            write_frame(&mut writer, &request).await?;
+            let mut reader = BufReader::new(reader);
+            read_frame(&mut reader, MAX_RESPONSE)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("PingX helper closed the connection"))
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("PingX helper did not respond"))?
     }
 
     async fn read_frame<T: for<'de> Deserialize<'de>>(
-        reader: tokio::net::unix::OwnedReadHalf,
-    ) -> Result<T> {
-        let reader = BufReader::new(reader);
-        let mut data = String::new();
-        let size = reader
-            .take((MAX_FRAME + 1) as u64)
-            .read_line(&mut data)
-            .await?;
-        anyhow::ensure!(
-            size > 0,
-            "helper connection closed before a request was received"
-        );
-        anyhow::ensure!(size <= MAX_FRAME, "helper request is too large");
-        Ok(serde_json::from_str(data.trim_end())?)
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        max: usize,
+    ) -> Result<Option<T>> {
+        let mut data = Vec::new();
+        loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                if data.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let content_len = newline.unwrap_or(available.len());
+            anyhow::ensure!(data.len() + content_len <= max, "helper frame is too large");
+            data.extend_from_slice(&available[..content_len]);
+            let consumed = content_len + usize::from(newline.is_some());
+            reader.consume(consumed);
+            if newline.is_some() {
+                break;
+            }
+        }
+        Ok(Some(serde_json::from_slice(&data)?))
     }
 
     async fn write_frame<T: Serialize>(
@@ -385,7 +1031,7 @@ mod macos {
         value: &T,
     ) -> Result<()> {
         let data = serde_json::to_vec(value)?;
-        anyhow::ensure!(data.len() <= MAX_FRAME, "helper response is too large");
+        anyhow::ensure!(data.len() <= MAX_REQUEST, "helper frame is too large");
         writer.write_all(&data).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
@@ -499,6 +1145,26 @@ mod macos {
     mod tests {
         use super::*;
 
+        fn ping_operation() -> PingOperation {
+            PingOperation {
+                targets: vec!["127.0.0.1".to_string()],
+                count: Some(1),
+                interval_ns: 1,
+                timeout_ns: 1,
+                deadline_ns: None,
+                ttl: 64,
+                size: 56,
+                quiet: false,
+                interface: None,
+                ipv4: false,
+                ipv6: false,
+                tcp: true,
+                udp: false,
+                json: true,
+                json_file: true,
+            }
+        }
+
         #[test]
         fn launchd_plist_uses_the_activation_socket() {
             let plist = launchd_plist().unwrap();
@@ -516,6 +1182,46 @@ mod macos {
             };
             let data = serde_json::to_vec(&state).unwrap();
             assert_eq!(serde_json::from_slice::<HelperState>(&data).unwrap(), state);
+        }
+
+        #[test]
+        fn worker_json_output_cannot_choose_a_file_path() {
+            let cli = ping_operation().to_cli();
+            assert_eq!(cli.json, Some(None));
+        }
+
+        #[test]
+        fn invalid_operations_are_rejected() {
+            let mut operation = Operation::Ping(ping_operation());
+            validate_operation(&operation).unwrap();
+
+            {
+                let Operation::Ping(ping) = &mut operation else {
+                    unreachable!()
+                };
+                ping.interval_ns = 0;
+            }
+            assert!(validate_operation(&operation).is_err());
+
+            {
+                let Operation::Ping(ping) = &mut operation else {
+                    unreachable!()
+                };
+                ping.interval_ns = 1;
+                ping.targets = vec!["https://example.com".to_string()];
+            }
+            assert!(validate_operation(&operation).is_err());
+        }
+
+        #[tokio::test]
+        async fn helper_frames_reject_oversized_input() {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut client, b"12345\n")
+                .await
+                .unwrap();
+            let (reader, _) = server.into_split();
+            let mut reader = BufReader::new(reader);
+            assert!(read_frame::<ClientControl>(&mut reader, 4).await.is_err());
         }
     }
 }
