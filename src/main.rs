@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod geoip;
 mod happy_eyeballs;
+mod helper;
 mod pinger;
 mod probe;
 mod session;
@@ -16,12 +17,30 @@ use session::Session;
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().len() == 1 {
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if raw_args.get(1).and_then(|arg| arg.to_str()) == Some("helper") {
+        if let Err(error) = helper::run_command(&raw_args[2..]).await {
+            eprintln!("pingx: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    match helper::run_internal(&raw_args[1..]).await {
+        Ok(Some(code)) => std::process::exit(code),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("pingx: {error:#}");
+            std::process::exit(1);
+        }
+    }
+
+    if raw_args.len() == 1 {
         let _ = Cli::command().print_help();
         return;
     }
 
-    let args = Cli::parse();
+    let args = Cli::parse_from(raw_args);
 
     if let Some(iface) = args.interface.as_deref()
         && utils::get_interface_ips(iface).is_empty()
