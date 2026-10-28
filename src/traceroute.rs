@@ -41,6 +41,8 @@ mod unix {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::io::unix::AsyncFd;
+    #[cfg(target_os = "macos")]
+    use tokio::sync::Mutex as AsyncMutex;
     use tokio::sync::mpsc;
     use unicode_width::UnicodeWidthStr;
 
@@ -181,7 +183,7 @@ mod unix {
                 "UDP traceroute port range exceeds 65535"
             );
         }
-        let socket = Arc::new(TraceSocket::new(target.is_ipv6(), protocol, trace_port)?);
+        let socket = Arc::new(TraceSocket::new(target, protocol, trace_port)?);
 
         println!(
             "{}",
@@ -502,14 +504,18 @@ mod unix {
     struct TraceSocket {
         send: AsyncFd<std::net::UdpSocket>,
         recv: AsyncFd<std::net::UdpSocket>,
+        #[cfg(not(target_os = "macos"))]
         tcp_recv: Option<AsyncFd<std::net::UdpSocket>>,
+        #[cfg(target_os = "macos")]
+        tcp_recv: Option<AsyncMutex<crate::probe::tcp_capture::TcpCapture>>,
         v6: bool,
         protocol: TraceProtocol,
         trace_port: u16,
     }
 
     impl TraceSocket {
-        fn new(v6: bool, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+        fn new(target: IpAddr, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+            let v6 = target.is_ipv6();
             let send = match protocol {
                 TraceProtocol::Icmp => Self::icmp_socket(v6)?,
                 TraceProtocol::Udp => {
@@ -523,6 +529,7 @@ mod unix {
                         .map_err(raw_error)?;
                     bind_device(&socket, v6)?;
                     if v6 {
+                        #[cfg(not(target_os = "macos"))]
                         socket.set_header_included_v6(true)?;
                     } else {
                         socket.set_header_included_v4(true)?;
@@ -562,6 +569,7 @@ mod unix {
                 TraceProtocol::Icmp => Self::icmp_socket(v6)?,
                 TraceProtocol::Tcp => Self::icmp_socket(v6)?,
             };
+            #[cfg(not(target_os = "macos"))]
             let tcp_recv = if protocol == TraceProtocol::Tcp {
                 let socket = Socket::new(domain(v6), Type::RAW, Some(socket2::Protocol::TCP))
                     .map_err(raw_error)?;
@@ -574,6 +582,15 @@ mod unix {
                 socket.set_nonblocking(true)?;
                 let socket: std::net::UdpSocket = socket.into();
                 Some(unsafe { AsyncFd::register(socket) }?)
+            } else {
+                None
+            };
+            #[cfg(target_os = "macos")]
+            let tcp_recv = if protocol == TraceProtocol::Tcp {
+                let local = crate::probe::tcp_syn::local_address_for(target)?;
+                Some(AsyncMutex::new(crate::probe::tcp_capture::TcpCapture::new(
+                    local,
+                )?))
             } else {
                 None
             };
@@ -652,6 +669,11 @@ mod unix {
                     ));
                 }
             };
+            let data = if self.protocol == TraceProtocol::Tcp {
+                crate::probe::tcp_syn::raw_tcp_payload(&data, target)?
+            } else {
+                &data
+            };
             #[cfg(target_os = "linux")]
             let mut udp_retries = 0;
             loop {
@@ -664,7 +686,7 @@ mod unix {
                     }
                     inner
                         .get_ref()
-                        .send_to(&data, SocketAddr::new(target, port))
+                        .send_to(data, SocketAddr::new(target, port))
                         .map(|_| ())
                 }) {
                     #[cfg(target_os = "linux")]
@@ -706,12 +728,13 @@ mod unix {
                 },
                 64,
             )?;
+            let packet = crate::probe::tcp_syn::raw_tcp_payload(&packet, target)?;
             loop {
                 let mut guard = self.send.writable().await?;
                 match guard.try_io(|inner| {
                     inner
                         .get_ref()
-                        .send_to(&packet, SocketAddr::new(target, 0))
+                        .send_to(packet, SocketAddr::new(target, 0))
                         .map(|_| ())
                 }) {
                     Ok(result) => return result,
@@ -830,6 +853,14 @@ mod unix {
             let socket = self.tcp_recv.as_ref().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::Unsupported, "TCP receiver unavailable")
             })?;
+            #[cfg(target_os = "macos")]
+            {
+                let (source, packet) = socket.lock().await.recv().await?;
+                let size = packet.len().min(data.len());
+                data[..size].copy_from_slice(&packet[..size]);
+                Ok((size, source))
+            }
+            #[cfg(not(target_os = "macos"))]
             loop {
                 let mut guard = socket.readable().await?;
                 match guard.try_io(|inner| {
@@ -909,8 +940,7 @@ mod unix {
         )
     }
 
-    #[cfg(test)]
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg(all(test, not(target_os = "macos")))]
     fn ip_checksum(header: &[u8]) -> u16 {
         finish_checksum(header.chunks(2).fold(0u32, |sum, word| {
             sum + u16::from_be_bytes([word[0], *word.get(1).unwrap_or(&0)]) as u32
@@ -1278,15 +1308,22 @@ mod unix {
         trace_port: u16,
         received_at: Instant,
     ) -> Option<Reply> {
-        if data.len() >= 40 && data[0] >> 4 == 4 && data[9] == 6 {
-            let ihl = usize::from(data[0] & 0x0f) * 4;
-            if ihl < 20 {
-                return None;
+        let tcp = match data {
+            [first, ..] if first >> 4 == 4 && data.get(9) == Some(&6) => {
+                let target = match target {
+                    IpAddr::V4(target) => target.octets(),
+                    IpAddr::V6(_) => return None,
+                };
+                if data.get(12..16) == Some(target.as_slice()) {
+                    let offset = usize::from(data[0] & 0x0f) * 4;
+                    data.get(offset..)?
+                } else {
+                    data
+                }
             }
-            let tcp = data.get(ihl..)?;
-            if tcp.len() < 20 || from != target {
-                return parse_icmp_probe_reply_v4(data, from, target, 6, trace_port, received_at);
-            }
+            _ => data,
+        };
+        if tcp.len() >= 20 && from == target {
             let local_port = u16::from_be_bytes([tcp[2], tcp[3]]);
             let acknowledgement = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
             if u16::from_be_bytes([tcp[0], tcp[1]]) == trace_port
@@ -1309,15 +1346,19 @@ mod unix {
 
     fn tcp_reset_fields(data: &[u8], target: IpAddr, target_port: u16) -> Option<(u16, u32)> {
         let tcp = match (target, data.first().map(|byte| byte >> 4)) {
-            (IpAddr::V4(_), Some(4)) if data.get(9) == Some(&6) => {
+            (IpAddr::V4(target), Some(4))
+                if data.get(9) == Some(&6)
+                    && data.get(12..16) == Some(target.octets().as_slice()) =>
+            {
                 let offset = usize::from(data[0] & 0x0f) * 4;
                 data.get(offset..)?
             }
-            (IpAddr::V6(_), Some(6)) => {
-                let offset = ipv6_transport_offset(data, 6)?;
-                data.get(offset..)?
+            (IpAddr::V6(target), Some(6))
+                if data.get(8..24) == Some(target.octets().as_slice()) =>
+            {
+                data.get(ipv6_transport_offset(data, 6)?..)?
             }
-            _ => return None,
+            _ => data,
         };
         if tcp.len() < 20
             || u16::from_be_bytes([tcp[0], tcp[1]]) != target_port
@@ -1337,12 +1378,15 @@ mod unix {
         trace_port: u16,
         received_at: Instant,
     ) -> Option<Reply> {
-        if data.len() >= 60 && data[0] >> 4 == 6 {
-            let tcp_offset = ipv6_transport_offset(data, 6)?;
-            let tcp = data.get(tcp_offset..)?;
-            if tcp.len() < 20 || from != target {
-                return parse_icmp_probe_reply_v6(data, from, target, 6, trace_port, received_at);
+        let tcp = match (target, data.first().map(|byte| byte >> 4)) {
+            (IpAddr::V6(target), Some(6))
+                if data.get(8..24) == Some(target.octets().as_slice()) =>
+            {
+                data.get(ipv6_transport_offset(data, 6)?..).unwrap_or(data)
             }
+            _ => data,
+        };
+        if tcp.len() >= 20 && from == target {
             let local_port = u16::from_be_bytes([tcp[2], tcp[3]]);
             let acknowledgement = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
             if u16::from_be_bytes([tcp[0], tcp[1]]) == trace_port
@@ -1891,7 +1935,7 @@ mod unix {
             let reserve = std::net::UdpSocket::bind(SocketAddr::new(target, 0)).unwrap();
             let base_port = reserve.local_addr().unwrap().port().min(65533);
             drop(reserve);
-            let socket = Arc::new(TraceSocket::new(false, TraceProtocol::Udp, base_port).unwrap());
+            let socket = Arc::new(TraceSocket::new(target, TraceProtocol::Udp, base_port).unwrap());
             let (tx, mut rx) = mpsc::channel(8);
             let receiver = spawn_receiver(socket.clone(), target, tx);
             let result = run_probes(
@@ -2150,6 +2194,16 @@ mod unix {
             .expect("parse IPv6 TCP control reply");
             assert_eq!(reply.token, source_port);
             assert_eq!(reply.kind, ReplyKind::Reached);
+            let bare = parse_reply(
+                &packet[20..],
+                IpAddr::V4(target),
+                IpAddr::V4(target),
+                TraceProtocol::Tcp,
+                target_port,
+                Instant::now(),
+            )
+            .expect("parse bare IPv4 TCP reply");
+            assert_eq!(bare.token, source_port);
         }
 
         #[test]
@@ -2671,6 +2725,8 @@ mod unix {
             );
             #[cfg(not(target_os = "macos"))]
             assert_eq!(ip_checksum(&packet[..20]), 0);
+            #[cfg(target_os = "macos")]
+            assert_eq!(&packet[10..12], &[0, 0]);
         }
 
         #[test]

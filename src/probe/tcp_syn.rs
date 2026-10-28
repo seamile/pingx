@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::unix::AsyncFd;
+#[cfg(target_os = "macos")]
+use tokio::sync::Mutex as AsyncMutex;
 
 const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
@@ -80,7 +82,7 @@ pub async fn probe(
         .ok_or_else(|| TcpSynFailure::Local("local source port unavailable".to_string()))?
         .port();
     let sequence = next_sequence();
-    let sockets = TcpSynSockets::new(target, ttl).map_err(to_local_failure)?;
+    let sockets = TcpSynSockets::new(local, target, ttl).map_err(to_local_failure)?;
     let packet = build_tcp_packet(
         local,
         target,
@@ -186,29 +188,43 @@ fn next_sequence() -> u32 {
 
 struct TcpSynSockets {
     send: AsyncFd<std::net::UdpSocket>,
+    #[cfg(not(target_os = "macos"))]
     tcp: AsyncFd<std::net::UdpSocket>,
+    #[cfg(target_os = "macos")]
+    tcp: AsyncMutex<crate::probe::tcp_capture::TcpCapture>,
     icmp: AsyncFd<std::net::UdpSocket>,
 }
 
 impl TcpSynSockets {
-    fn new(target: IpAddr, ttl: u8) -> io::Result<Self> {
+    fn new(local: IpAddr, target: IpAddr, ttl: u8) -> io::Result<Self> {
         let v6 = target.is_ipv6();
+        #[cfg(not(target_os = "macos"))]
+        let _ = local;
         let send = raw_socket(v6, Protocol::TCP)?;
         bind_device(&send, v6)?;
         if v6 {
-            send.set_header_included_v6(true)?;
             send.set_unicast_hops_v6(u32::from(ttl))?;
+            #[cfg(not(target_os = "macos"))]
+            send.set_header_included_v6(true)?;
         } else {
             send.set_header_included_v4(true)?;
             send.set_ttl_v4(u32::from(ttl))?;
         }
-        let tcp = raw_socket(v6, Protocol::TCP)?;
-        bind_device(&tcp, v6)?;
-        if v6 {
-            tcp.set_header_included_v6(true)?;
-        } else {
-            tcp.set_header_included_v4(true)?;
-        }
+        #[cfg(not(target_os = "macos"))]
+        let tcp = {
+            let tcp = raw_socket(v6, Protocol::TCP)?;
+            bind_device(&tcp, v6)?;
+            if v6 {
+                tcp.set_header_included_v6(true)?;
+            } else {
+                tcp.set_header_included_v4(true)?;
+            }
+            tcp.set_nonblocking(true)?;
+            let tcp: std::net::UdpSocket = tcp.into();
+            unsafe { AsyncFd::register(tcp) }?
+        };
+        #[cfg(target_os = "macos")]
+        let tcp = AsyncMutex::new(crate::probe::tcp_capture::TcpCapture::new(local)?);
         let icmp_protocol = if v6 {
             Protocol::ICMPV6
         } else {
@@ -218,15 +234,13 @@ impl TcpSynSockets {
         bind_device(&icmp, v6)?;
 
         send.set_nonblocking(true)?;
-        tcp.set_nonblocking(true)?;
         icmp.set_nonblocking(true)?;
         // Tokio can drive nonblocking raw Unix sockets through AsyncFd.
         let send: std::net::UdpSocket = send.into();
-        let tcp: std::net::UdpSocket = tcp.into();
         let icmp: std::net::UdpSocket = icmp.into();
         Ok(Self {
             send: unsafe { AsyncFd::register(send) }?,
-            tcp: unsafe { AsyncFd::register(tcp) }?,
+            tcp,
             icmp: unsafe { AsyncFd::register(icmp) }?,
         })
     }
@@ -234,6 +248,7 @@ impl TcpSynSockets {
     async fn send(&self, packet: &[u8], target: IpAddr) -> io::Result<()> {
         loop {
             let mut guard = self.send.writable().await?;
+            let packet = raw_tcp_payload(packet, target)?;
             match guard.try_io(|inner| {
                 inner
                     .get_ref()
@@ -247,12 +262,34 @@ impl TcpSynSockets {
     }
 
     async fn recv_tcp(&self, data: &mut [u8]) -> io::Result<(usize, IpAddr)> {
+        #[cfg(target_os = "macos")]
+        {
+            let (source, packet) = self.tcp.lock().await.recv().await?;
+            let size = packet.len().min(data.len());
+            data[..size].copy_from_slice(&packet[..size]);
+            Ok((size, source))
+        }
+        #[cfg(not(target_os = "macos"))]
         recv_from(&self.tcp, data).await
     }
 
     async fn recv_icmp(&self, data: &mut [u8]) -> io::Result<(usize, IpAddr)> {
         recv_from(&self.icmp, data).await
     }
+}
+
+pub(crate) fn raw_tcp_payload(packet: &[u8], target: IpAddr) -> io::Result<&[u8]> {
+    #[cfg(target_os = "macos")]
+    if target.is_ipv6() {
+        return packet.get(40..).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "macOS IPv6 TCP packet is too short",
+            )
+        });
+    }
+    let _ = target;
+    Ok(packet)
 }
 
 async fn recv_from(
@@ -331,8 +368,6 @@ fn build_tcp_packet_v4(
     packet[9] = 6;
     packet[12..16].copy_from_slice(&source.octets());
     packet[16..20].copy_from_slice(&target.octets());
-    let header_checksum = finish_checksum(words(&packet[..20]));
-    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
     fill_tcp_header(&mut packet[20..], &segment);
     let sum = pseudo_header(&source.octets(), &target.octets(), packet[20..].len())
         + words(&packet[20..]);
@@ -343,7 +378,11 @@ fn build_tcp_packet_v4(
     {
         packet[2..4].copy_from_slice(&(total as u16).to_ne_bytes());
         packet[6..8].copy_from_slice(&0x4000u16.to_ne_bytes());
-        packet[10..12].fill(0);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let header_checksum = finish_checksum(words(&packet[..20]));
+        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
     }
     Ok(packet)
 }
@@ -399,19 +438,30 @@ fn parse_tcp_reply(
     target_port: u16,
     sequence: u32,
 ) -> Option<ParsedTcpReply> {
-    let (packet_source, packet_target, tcp) = match target {
+    let (tcp, has_ip_header) = match target {
         IpAddr::V4(_) => {
-            let (ip, tcp) = strip_ipv4(data, 6)?;
-            (IpAddr::V4(ip.0), IpAddr::V4(ip.1), tcp)
+            if let Some(((source, destination), tcp)) = strip_ipv4(data, 6)
+                && IpAddr::V4(source) == target
+                && IpAddr::V4(destination) == local
+            {
+                (tcp, true)
+            } else {
+                (data, false)
+            }
         }
         IpAddr::V6(_) => {
-            let (ip, tcp) = strip_ipv6(data, 6)?;
-            (IpAddr::V6(ip.0), IpAddr::V6(ip.1), tcp)
+            if let Some(((source, destination), tcp)) = strip_ipv6(data, 6)
+                && IpAddr::V6(source) == target
+                && IpAddr::V6(destination) == local
+            {
+                (tcp, true)
+            } else {
+                (data, false)
+            }
         }
     };
-    if packet_source != target
-        || packet_target != local
-        || (from != target && from != packet_source)
+    if from != target
+        || (!has_ip_header && data.len() < 20)
         || tcp.len() < 20
         || u16::from_be_bytes([tcp[0], tcp[1]]) != target_port
         || u16::from_be_bytes([tcp[2], tcp[3]]) != source_port
@@ -696,6 +746,30 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_ipv6_raw_payload_contains_only_the_transport_header() {
+        let packet = build_tcp_packet(
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+            TcpSegment {
+                source_port: 40000,
+                target_port: 443,
+                sequence: 1,
+                acknowledgement: 0,
+                flags: TCP_SYN,
+                payload: &[],
+            },
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            raw_tcp_payload(&packet, "2001:db8::2".parse().unwrap()).unwrap(),
+            &packet[40..]
+        );
+        assert!(raw_tcp_payload(&packet[..39], "2001:db8::2".parse().unwrap()).is_err());
+    }
+
     #[test]
     fn parses_only_matching_syn_ack_and_reset_replies() {
         let local_ip: Ipv4Addr = "192.0.2.1".parse().unwrap();
@@ -706,6 +780,12 @@ mod tests {
         let packet = tcp_reply_v4(local_ip, target_ip, 443, 40000, sequence + 1, 0x12);
         assert_eq!(
             parse_tcp_reply(&packet, target, local, target, 40000, 443, sequence)
+                .unwrap()
+                .kind,
+            TcpSynKind::Open
+        );
+        assert_eq!(
+            parse_tcp_reply(&packet[20..], target, local, target, 40000, 443, sequence)
                 .unwrap()
                 .kind,
             TcpSynKind::Open
@@ -723,6 +803,24 @@ mod tests {
         );
         let wrong_ack = tcp_reply_v4(local_ip, target_ip, 443, 40000, sequence + 2, 0x12);
         assert!(parse_tcp_reply(&wrong_ack, target, local, target, 40000, 443, sequence).is_none());
+    }
+
+    #[test]
+    fn ipv6_transport_parser_skips_extension_headers() {
+        let source = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+        let target = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let mut packet = vec![0u8; 40 + 8 + 20];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&28u16.to_be_bytes());
+        packet[6] = 0;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&target.octets());
+        packet[40] = 6;
+
+        let ((parsed_source, parsed_target), tcp) = strip_ipv6(&packet, 6).unwrap();
+        assert_eq!(parsed_source, source);
+        assert_eq!(parsed_target, target);
+        assert_eq!(tcp.len(), 20);
     }
 
     #[test]

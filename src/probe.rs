@@ -2,6 +2,8 @@ use anyhow::{Result, bail, ensure};
 use reqwest::Url;
 use std::net::{IpAddr, Ipv6Addr};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod tcp_capture;
 #[cfg(unix)]
 pub(crate) mod tcp_syn;
 #[cfg(unix)]
