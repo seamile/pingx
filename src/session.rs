@@ -743,7 +743,7 @@ impl Session {
     }
 }
 
-fn write_json_file(path: &str, data: &[u8]) -> Result<()> {
+pub(crate) fn write_json_file(path: &str, data: &[u8]) -> Result<()> {
     use std::io::Write;
 
     let mut file = std::fs::File::create(path)

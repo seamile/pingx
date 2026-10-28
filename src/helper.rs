@@ -585,8 +585,10 @@ mod macos {
                             if code == 0 && json_file_requested
                                 && let Some(path) = json_path.as_ref()
                             {
-                                fs::write(path, json_data.as_bytes())
-                                    .with_context(|| format!("write JSON to {}", path.display()))?;
+                                crate::session::write_json_file(
+                                    path.to_str().context("JSON path is not valid UTF-8")?,
+                                    json_data.as_bytes(),
+                                )?;
                             }
                             return Ok(code);
                         }
