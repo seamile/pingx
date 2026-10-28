@@ -15,20 +15,22 @@ impl TraceSession {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn run_trace(_cli: Cli) -> Result<()> {
     Err(anyhow::anyhow!(
         "traceroute mode is not supported on this platform"
     ))
 }
 
-#[cfg(unix)]
-mod unix {
+#[cfg(any(unix, windows))]
+mod platform {
     use super::*;
     use crate::cli::Protocol as ProbeProtocol;
     use crate::geoip::GeoIpManager;
     use crate::pinger::icmp_packet::IcmpPacket;
     use crate::utils::{IpVersion, resolve_host};
+    #[cfg(windows)]
+    use crate::windivert::{Capture, Injector, packet_source};
     use async_trait::async_trait;
     use colored::Colorize;
     use socket2::{Domain, Protocol, Socket, Type};
@@ -37,9 +39,11 @@ mod unix {
     use std::collections::{BTreeMap, HashMap};
     use std::io;
     use std::net::{IpAddr, SocketAddr};
+    #[cfg(unix)]
     use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    #[cfg(unix)]
     use tokio::io::unix::AsyncFd;
     #[cfg(target_os = "macos")]
     use tokio::sync::Mutex as AsyncMutex;
@@ -501,6 +505,7 @@ mod unix {
         )
     }
 
+    #[cfg(unix)]
     struct TraceSocket {
         send: AsyncFd<std::net::UdpSocket>,
         recv: AsyncFd<std::net::UdpSocket>,
@@ -513,6 +518,7 @@ mod unix {
         trace_port: u16,
     }
 
+    #[cfg(unix)]
     impl TraceSocket {
         fn new(target: IpAddr, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
             let v6 = target.is_ipv6();
@@ -876,6 +882,232 @@ mod unix {
         }
     }
 
+    #[cfg(windows)]
+    enum WindowsSend {
+        Datagram(tokio::net::UdpSocket),
+        Injector(Injector),
+    }
+
+    #[cfg(windows)]
+    struct TraceSocket {
+        send: WindowsSend,
+        capture: Capture,
+        local: IpAddr,
+        v6: bool,
+        protocol: TraceProtocol,
+        trace_port: u16,
+    }
+
+    #[cfg(windows)]
+    impl TraceSocket {
+        fn new(target: IpAddr, protocol: TraceProtocol, trace_port: u16) -> io::Result<Self> {
+            let v6 = target.is_ipv6();
+            let local = crate::probe::tcp_syn::local_address_for(target)?;
+            let send = match protocol {
+                TraceProtocol::Icmp => WindowsSend::Datagram(probe_socket(local, v6, protocol)?),
+                TraceProtocol::Udp => WindowsSend::Datagram(probe_socket(local, v6, protocol)?),
+                TraceProtocol::Tcp => WindowsSend::Injector(Injector::open()?),
+            };
+            let capture = Capture::open(&trace_filter(local, target, protocol, trace_port)?)?;
+            Ok(Self {
+                send,
+                capture,
+                local,
+                v6,
+                protocol,
+                trace_port,
+            })
+        }
+
+        fn set_ttl(&self, ttl: u8) -> io::Result<()> {
+            let WindowsSend::Datagram(socket) = &self.send else {
+                return Ok(());
+            };
+            let socket = socket2::SockRef::from(socket);
+            if self.v6 {
+                socket.set_unicast_hops_v6(u32::from(ttl))
+            } else {
+                socket.set_ttl_v4(u32::from(ttl))
+            }
+        }
+
+        async fn send_to(&self, probe: ProbePacket, target: IpAddr, ttl: u8) -> io::Result<()> {
+            match (&self.protocol, probe) {
+                (TraceProtocol::Icmp, ProbePacket::Icmp(data)) => {
+                    self.set_ttl(ttl)?;
+                    self.datagram()?
+                        .send_to(&data, SocketAddr::new(target, 0))
+                        .await
+                        .map(|_| ())
+                }
+                (TraceProtocol::Udp, ProbePacket::Udp(data, port)) => {
+                    self.set_ttl(ttl)?;
+                    let socket = self.datagram()?;
+                    let mut retries = 0;
+                    loop {
+                        match socket.send_to(&data, SocketAddr::new(target, port)).await {
+                            Err(error)
+                                if retries < 3
+                                    && matches!(
+                                        error.kind(),
+                                        io::ErrorKind::ConnectionReset
+                                            | io::ErrorKind::ConnectionRefused
+                                            | io::ErrorKind::HostUnreachable
+                                            | io::ErrorKind::NetworkUnreachable
+                                    ) =>
+                            {
+                                retries += 1;
+                                tokio::task::yield_now().await;
+                            }
+                            result => return result.map(|_| ()),
+                        }
+                    }
+                }
+                (TraceProtocol::Tcp, ProbePacket::Tcp(payload, source_port)) => {
+                    let packet =
+                        build_tcp_packet(target, self.trace_port, source_port, &payload, ttl)?;
+                    let WindowsSend::Injector(injector) = &self.send else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "TCP injector unavailable",
+                        ));
+                    };
+                    injector.send(&packet, target.is_ipv6()).map(|_| ())
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "probe/protocol mismatch",
+                )),
+            }
+        }
+
+        fn datagram(&self) -> io::Result<&tokio::net::UdpSocket> {
+            match &self.send {
+                WindowsSend::Datagram(socket) => Ok(socket),
+                WindowsSend::Injector(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "datagram socket unavailable",
+                )),
+            }
+        }
+
+        async fn send_tcp_reset(
+            &self,
+            target: IpAddr,
+            local_port: u16,
+            remote_port: u16,
+            sequence: u32,
+        ) -> io::Result<()> {
+            let packet = crate::probe::tcp_syn::build_tcp_packet(
+                self.local,
+                target,
+                crate::probe::tcp_syn::TcpSegment {
+                    source_port: remote_port,
+                    target_port: local_port,
+                    sequence,
+                    acknowledgement: 0,
+                    flags: TCP_RST,
+                    payload: &[],
+                },
+                64,
+            )?;
+            let WindowsSend::Injector(injector) = &self.send else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP injector unavailable",
+                ));
+            };
+            injector.send(&packet, target.is_ipv6()).map(|_| ())
+        }
+
+        async fn recv(&self, data: &mut [u8]) -> io::Result<(usize, IpAddr)> {
+            let packet = self.capture.recv_any().await?;
+            let from = packet_source(&packet.data).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "WinDivert returned a short packet",
+                )
+            })?;
+            let size = packet.data.len().min(data.len());
+            data[..size].copy_from_slice(&packet.data[..size]);
+            Ok((size, from))
+        }
+    }
+
+    #[cfg(windows)]
+    fn probe_socket(
+        local: IpAddr,
+        v6: bool,
+        trace_protocol: TraceProtocol,
+    ) -> io::Result<tokio::net::UdpSocket> {
+        let (kind, protocol) = match trace_protocol {
+            TraceProtocol::Icmp if v6 => (Type::RAW, socket2::Protocol::ICMPV6),
+            TraceProtocol::Icmp => (Type::RAW, socket2::Protocol::ICMPV4),
+            TraceProtocol::Udp => (Type::DGRAM, socket2::Protocol::UDP),
+            TraceProtocol::Tcp => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP probes use WinDivert",
+                ));
+            }
+        };
+        let socket = Socket::new(domain(v6), kind, Some(protocol)).map_err(trace_socket_error)?;
+        socket.bind(&SocketAddr::new(local, 0).into())?;
+        socket.set_nonblocking(true)?;
+        let socket: std::net::UdpSocket = socket.into();
+        tokio::net::UdpSocket::from_std(socket)
+    }
+
+    #[cfg(windows)]
+    fn trace_socket_error(error: io::Error) -> io::Error {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "traceroute requires Administrator privileges on Windows",
+            )
+        } else {
+            error
+        }
+    }
+
+    #[cfg(windows)]
+    fn trace_filter(
+        local: IpAddr,
+        target: IpAddr,
+        protocol: TraceProtocol,
+        trace_port: u16,
+    ) -> io::Result<String> {
+        if local.is_ipv6() != target.is_ipv6() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source and target address families differ",
+            ));
+        }
+        let filter = if target.is_ipv6() {
+            let tcp = (protocol == TraceProtocol::Tcp).then(|| {
+                format!(
+                    " or (tcp and ipv6.SrcAddr == {target} and tcp.SrcPort == {trace_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
+                )
+            });
+            format!(
+                "(inbound or loopback) and ipv6 and ipv6.DstAddr == {local} and ((icmpv6 and (icmpv6.Type == 129 or icmpv6.Type == 1 or icmpv6.Type == 3)){})",
+                tcp.as_deref().unwrap_or("")
+            )
+        } else {
+            let tcp = (protocol == TraceProtocol::Tcp).then(|| {
+                format!(
+                    " or (tcp and ip.SrcAddr == {target} and tcp.SrcPort == {trace_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
+                )
+            });
+            format!(
+                "(inbound or loopback) and ip and ip.DstAddr == {local} and ((icmp and (icmp.Type == 0 or icmp.Type == 3 or icmp.Type == 11)){})",
+                tcp.as_deref().unwrap_or("")
+            )
+        };
+        Ok(filter)
+    }
+
+    #[cfg(unix)]
     fn socket_type() -> Type {
         Type::RAW
     }
@@ -891,6 +1123,7 @@ mod unix {
         if v6 { Domain::IPV6 } else { Domain::IPV4 }
     }
 
+    #[cfg(unix)]
     fn raw_error(error: io::Error) -> io::Error {
         if error.kind() == io::ErrorKind::PermissionDenied {
             io::Error::new(
@@ -902,6 +1135,7 @@ mod unix {
         }
     }
 
+    #[cfg(unix)]
     fn bind_device(socket: &Socket, v6: bool) -> io::Result<()> {
         if let Some(iface) = crate::utils::get_bind_interface() {
             crate::utils::bind_socket_to_interface(socket, iface, v6)?;
@@ -909,6 +1143,7 @@ mod unix {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn set_ttl_value(socket: &Socket, v6: bool, ttl: u8) -> io::Result<()> {
         if v6 {
             socket.set_unicast_hops_v6(u32::from(ttl))
@@ -1000,6 +1235,7 @@ mod unix {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut icmp_data = [0u8; 65535];
+            #[cfg(not(windows))]
             let mut tcp_data = [0u8; 65535];
             loop {
                 #[cfg(target_os = "linux")]
@@ -1031,7 +1267,7 @@ mod unix {
                         )
                     })
                 };
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(all(not(target_os = "linux"), not(windows)))]
                 let received = if socket.tcp_recv.is_some() {
                     tokio::select! {
                         result = socket.recv(&mut icmp_data) => result.map(|(size, from)| (size, from, icmp_data[..size].to_vec(), None::<(u8, u8)>, None::<SocketAddr>)),
@@ -1048,6 +1284,16 @@ mod unix {
                         )
                     })
                 };
+                #[cfg(windows)]
+                let received = socket.recv(&mut icmp_data).await.map(|(size, from)| {
+                    (
+                        size,
+                        from,
+                        icmp_data[..size].to_vec(),
+                        None::<(u8, u8)>,
+                        None::<SocketAddr>,
+                    )
+                });
                 match received {
                     Ok((_, from, data, _error, _destination)) => {
                         let received_at = Instant::now();
@@ -1249,7 +1495,7 @@ mod unix {
         target: IpAddr,
         received_at: Instant,
     ) -> Option<Reply> {
-        let packet = IcmpPacket::decode(data).ok()?;
+        let packet = IcmpPacket::decode(strip_ipv6_icmp(data)?).ok()?;
         let kind = match packet.message_type {
             129 if from == target => ReplyKind::Reached,
             ICMP_TIME_EXCEEDED_V6 => ReplyKind::Hop,
@@ -1282,6 +1528,14 @@ mod unix {
         // Some raw/DGRAM ICMP reads omit the outer IPv4 header.
         (data.len() >= 8 && matches!(data[0], 0 | ICMP_TIME_EXCEEDED_V4 | ICMP_DEST_UNREACH_V4))
             .then_some((data, 0))
+    }
+
+    fn strip_ipv6_icmp(data: &[u8]) -> Option<&[u8]> {
+        if data.len() >= 40 && data[0] >> 4 == 6 {
+            data.get(ipv6_transport_offset(data, 58)?..)
+        } else {
+            Some(data)
+        }
     }
 
     fn embedded_token_v4(icmp: &[u8]) -> Option<u16> {
@@ -1475,7 +1729,7 @@ mod unix {
         trace_port: u16,
         received_at: Instant,
     ) -> Option<Reply> {
-        let packet = IcmpPacket::decode(data).ok()?;
+        let packet = IcmpPacket::decode(strip_ipv6_icmp(data)?).ok()?;
         if !matches!(
             packet.message_type,
             ICMP_TIME_EXCEEDED_V6 | ICMP_DEST_UNREACH_V6
@@ -2323,6 +2577,41 @@ mod unix {
         }
 
         #[test]
+        fn parses_ipv6_icmp_with_full_ip_header() {
+            let target = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+            let local = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+            let router = "2001:db8::ff".parse::<Ipv6Addr>().unwrap();
+            let inner = IcmpPacket::new_request(true, trace_ident(), 46, vec![0; 12]).encode();
+            let mut embedded = vec![0u8; 40];
+            embedded[0] = 0x60;
+            embedded[4..6].copy_from_slice(&(inner.len() as u16).to_be_bytes());
+            embedded[6] = 58;
+            embedded[7] = 64;
+            embedded[8..24].copy_from_slice(&local.octets());
+            embedded[24..40].copy_from_slice(&target.octets());
+            embedded.extend(inner);
+            let mut icmp = vec![ICMP_TIME_EXCEEDED_V6, 0, 0, 0, 0, 0, 0, 0];
+            icmp.extend(embedded);
+            let mut packet = vec![0u8; 40];
+            packet[0] = 0x60;
+            packet[4..6].copy_from_slice(&(icmp.len() as u16).to_be_bytes());
+            packet[6] = 58;
+            packet[7] = 64;
+            packet[8..24].copy_from_slice(&router.octets());
+            packet[24..40].copy_from_slice(&local.octets());
+            packet.extend(icmp);
+            let reply = parse_reply_v6(
+                &packet,
+                IpAddr::V6(router),
+                IpAddr::V6(target),
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(reply.sequence, 46);
+            assert_eq!(reply.kind, ReplyKind::Hop);
+        }
+
+        #[test]
         fn rtt_uses_the_receive_timestamp_not_processing_time() {
             let started = Instant::now();
             let received_at = started + Duration::from_millis(7);
@@ -2351,6 +2640,22 @@ mod unix {
                 .is_none()
             );
             assert!(embedded_sequence_v4(&[0; 8], IpAddr::V6(Ipv6Addr::LOCALHOST)).is_none());
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn windows_trace_filter_matches_icmp_and_the_tcp_tuple() {
+            let filter = trace_filter(
+                "192.0.2.10".parse().unwrap(),
+                "198.51.100.20".parse().unwrap(),
+                TraceProtocol::Tcp,
+                443,
+            )
+            .unwrap();
+            assert!(filter.contains("icmp.Type == 11"));
+            assert!(filter.contains("ip.SrcAddr == 198.51.100.20"));
+            assert!(filter.contains("tcp.SrcPort == 443"));
+            assert!(filter.contains("tcp.SYN and tcp.ACK"));
         }
 
         #[test]
@@ -2895,5 +3200,5 @@ mod unix {
     }
 }
 
-#[cfg(unix)]
-use unix::run_trace;
+#[cfg(any(unix, windows))]
+use platform::run_trace;

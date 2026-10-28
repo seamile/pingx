@@ -1,5 +1,6 @@
 use std::ffi::{CString, c_char, c_void};
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -192,27 +193,42 @@ impl Capture {
     }
 
     pub(crate) async fn recv(&self, timeout: Duration) -> io::Result<Packet> {
+        self.recv_inner(Some(timeout)).await
+    }
+
+    pub(crate) async fn recv_any(&self) -> io::Result<Packet> {
+        self.recv_inner(None).await
+    }
+
+    async fn recv_inner(&self, timeout: Option<Duration>) -> io::Result<Packet> {
         let handle = self.handle.clone();
         let mut guard = RecvGuard::new(handle.clone());
         let mut worker = tokio::task::spawn_blocking(move || recv_blocking(&handle));
-        match tokio::time::timeout(timeout, &mut worker).await {
-            Ok(Ok(result)) => {
+        let received = if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, &mut worker).await {
+                Ok(received) => received,
+                Err(_) => {
+                    guard.shutdown();
+                    let _ = worker.await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "WinDivert receive timed out",
+                    ));
+                }
+            }
+        } else {
+            worker.await
+        };
+        match received {
+            Ok(result) => {
                 guard.armed = false;
                 result
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 guard.armed = false;
                 Err(io::Error::other(format!(
                     "WinDivert receive task failed: {error}"
                 )))
-            }
-            Err(_) => {
-                guard.shutdown();
-                let _ = worker.await;
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "WinDivert receive timed out",
-                ))
             }
         }
     }
@@ -274,6 +290,18 @@ fn recv_blocking(handle: &RawHandle) -> io::Result<Packet> {
         )
     })?);
     Ok(Packet { data })
+}
+
+pub(crate) fn packet_source(packet: &[u8]) -> Option<IpAddr> {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]).into())
+        }
+        Some(6) if packet.len() >= 40 => {
+            Some(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?).into())
+        }
+        _ => None,
+    }
 }
 
 fn check_version(functions: &Functions, handle: HANDLE) -> io::Result<()> {

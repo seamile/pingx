@@ -20,7 +20,6 @@ pub struct GeoIpManager {
 }
 
 impl GeoIpManager {
-    #[cfg(unix)]
     pub fn has_databases(&self) -> bool {
         self.db_v4.is_some() || self.db_v6.is_some()
     }

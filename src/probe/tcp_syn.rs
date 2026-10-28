@@ -264,7 +264,7 @@ pub async fn probe_windows(
                 rtt: started.elapsed(),
             });
         }
-        if let Some(from) = packet_source(&received.data)
+        if let Some(from) = crate::windivert::packet_source(&received.data)
             && let Some(failure) =
                 parse_icmp_error(&received.data, from, local, target, source_port, port)
         {
@@ -283,19 +283,6 @@ fn reply_filter(local: IpAddr, target: IpAddr, source_port: u16, target_port: u1
         format!(
             "(inbound or loopback) and (((ipv6 and ipv6.SrcAddr == {target} and ipv6.DstAddr == {local} and tcp.SrcPort == {target_port} and tcp.DstPort == {source_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK))) or (icmpv6 and ipv6.DstAddr == {local} and (icmpv6.Type == {ICMP_DEST_UNREACH_V6} or icmpv6.Type == {ICMP_TIME_EXCEEDED_V6}))))"
         )
-    }
-}
-
-#[cfg(windows)]
-fn packet_source(packet: &[u8]) -> Option<IpAddr> {
-    match packet.first().map(|byte| byte >> 4) {
-        Some(4) if packet.len() >= 20 => {
-            Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]).into())
-        }
-        Some(6) if packet.len() >= 40 => {
-            Some(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?).into())
-        }
-        _ => None,
     }
 }
 

@@ -1,5 +1,5 @@
 use super::udp_error::{self, UdpIcmpError, UdpProbeFailure, UdpProbeKind, UdpProbeReply};
-use crate::windivert::Capture;
+use crate::windivert::{Capture, packet_source};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -116,18 +116,6 @@ fn icmp_filter(local: IpAddr, target: IpAddr) -> String {
         format!(
             "(inbound or loopback) and icmpv6 and ipv6.DstAddr == {local} and (icmpv6.Type == 1 or icmpv6.Type == 3)"
         )
-    }
-}
-
-fn packet_source(packet: &[u8]) -> Option<IpAddr> {
-    match packet.first().map(|byte| byte >> 4) {
-        Some(4) if packet.len() >= 20 => {
-            Some(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]).into())
-        }
-        Some(6) if packet.len() >= 40 => {
-            Some(Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?).into())
-        }
-        _ => None,
     }
 }
 
