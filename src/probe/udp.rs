@@ -14,6 +14,7 @@ pub async fn probe(
     timeout: Duration,
     ttl: u32,
 ) -> Result<UdpProbeReply, UdpProbeFailure> {
+    udp_error::validate_payload_size(payload_size)?;
     let ttl = u8::try_from(ttl)
         .map_err(|_| UdpProbeFailure::Local("TTL must be between 0 and 255".to_string()))?;
     let sockets = UdpProbeSockets::new(target, port, ttl).map_err(to_local_failure)?;

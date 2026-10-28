@@ -332,13 +332,15 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 let cli = ping.to_cli();
                 for target in &ping.targets {
                     anyhow::ensure!(target.len() <= 1024, "target name is too long");
+                    let protocol = cli.target_spec(target)?.protocol;
                     anyhow::ensure!(
-                        !matches!(
-                            cli.target_spec(target)?.protocol,
-                            crate::cli::Protocol::Http(_)
-                        ),
+                        !matches!(protocol, crate::cli::Protocol::Http(_)),
                         "HTTP targets do not use the privileged helper"
                     );
+                    if matches!(protocol, crate::cli::Protocol::Udp(_)) {
+                        crate::probe::udp_error::validate_payload_size(ping.size)
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    }
                 }
             }
             Operation::Trace(trace) => {
@@ -1877,6 +1879,17 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 };
                 ping.ipv6 = false;
                 ping.json = false;
+            }
+            assert!(validate_operation(&operation).is_err());
+
+            {
+                let Operation::Ping(ping) = &mut operation else {
+                    unreachable!()
+                };
+                ping.json = true;
+                ping.tcp = false;
+                ping.udp = true;
+                ping.size = crate::probe::udp_error::MAX_UDP_PAYLOAD + 1;
             }
             assert!(validate_operation(&operation).is_err());
         }

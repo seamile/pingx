@@ -7,6 +7,7 @@ const ICMP_DEST_UNREACH_V4: u8 = 3;
 const ICMP_TIME_EXCEEDED_V4: u8 = 11;
 const ICMP_DEST_UNREACH_V6: u8 = 1;
 const ICMP_TIME_EXCEEDED_V6: u8 = 3;
+pub(crate) const MAX_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UdpProbeKind {
@@ -61,6 +62,15 @@ pub(crate) enum UdpIcmpError {
         node: Option<IpAddr>,
         reason: String,
     },
+}
+
+pub(crate) fn validate_payload_size(size: usize) -> Result<(), UdpProbeFailure> {
+    if size > MAX_UDP_PAYLOAD {
+        return Err(UdpProbeFailure::Local(format!(
+            "UDP payload must not exceed {MAX_UDP_PAYLOAD} bytes"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn classify_icmp(error: IcmpError, target: IpAddr) -> UdpIcmpError {
@@ -278,6 +288,12 @@ fn ipv6_transport_offset(payload: &[u8], protocol: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_udp_payloads_that_cannot_fit_ipv4() {
+        assert!(validate_payload_size(MAX_UDP_PAYLOAD).is_ok());
+        assert!(validate_payload_size(MAX_UDP_PAYLOAD + 1).is_err());
+    }
 
     #[test]
     fn parses_ipv4_and_full_ipv6_icmp_errors() {
