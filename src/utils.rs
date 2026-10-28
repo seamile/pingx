@@ -463,7 +463,12 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> {
     Ok(())
 }

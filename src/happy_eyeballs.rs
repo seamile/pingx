@@ -24,7 +24,7 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
 
     let sorted_addrs = interleave_addrs(addrs);
     let fallback = sorted_addrs.first().copied();
-    let mut addr_iter = sorted_addrs.into_iter();
+    let mut addr_iter = sorted_addrs.clone().into_iter();
     let mut futures = FuturesUnordered::new();
 
     let mut last_start_time = Instant::now();
@@ -82,7 +82,35 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
         }
     }
 
-    fallback.ok_or_else(|| anyhow::anyhow!("No addresses to probe"))
+    select_fallback_with(sorted_addrs.clone(), route_available)
+        .or(fallback)
+        .ok_or_else(|| anyhow::anyhow!("No addresses to probe"))
+}
+
+fn select_fallback_with(
+    addrs: Vec<IpAddr>,
+    route_available: impl Fn(IpAddr) -> std::io::Result<()>,
+) -> Option<IpAddr> {
+    addrs
+        .into_iter()
+        .find(|addr| route_available(*addr).is_ok())
+}
+
+fn route_available(target: IpAddr) -> std::io::Result<()> {
+    let domain = if target.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    #[cfg(unix)]
+    if let Some(interface) = crate::utils::get_bind_interface()
+        && let Err(error) =
+            crate::utils::bind_socket_to_interface(&socket, interface, target.is_ipv6())
+    {
+        return Err(error);
+    }
+    socket.connect(&SocketAddr::new(target, 33434).into())
 }
 
 struct AbortOnDropHandle<T>(JoinHandle<T>);
@@ -266,5 +294,41 @@ mod tests {
         let input = vec![v4_1, v6_1, v6_2];
         let output = interleave_addrs(input);
         assert_eq!(output, vec![v6_1, v4_1, v6_2]);
+    }
+
+    #[test]
+    fn fallback_prefers_an_address_with_a_route() {
+        let reachable = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let routed = vec![
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            reachable,
+        ];
+        let selected = select_fallback_with(routed, |addr| {
+            if addr == reachable {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NetworkUnreachable,
+                    "unreachable",
+                ))
+            }
+        });
+        assert_eq!(selected, Some(reachable));
+    }
+
+    #[test]
+    fn fallback_keeps_the_first_address_without_any_route() {
+        let first = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let addrs = vec![first, IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        assert_eq!(
+            select_fallback_with(addrs.clone(), |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NetworkUnreachable,
+                    "unreachable",
+                ))
+            })
+            .or(addrs.first().copied()),
+            Some(first)
+        );
     }
 }
