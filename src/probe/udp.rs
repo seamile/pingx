@@ -1,7 +1,9 @@
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
+#[cfg(any(test, not(target_os = "linux")))]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
 
@@ -244,6 +246,7 @@ impl UdpProbeSockets {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn recv_from(
     socket: &AsyncFd<std::net::UdpSocket>,
     data: &mut [u8],
@@ -276,6 +279,7 @@ fn classify_icmp(error: IcmpError, target: IpAddr) -> ReceiveEvent {
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn parse_icmp_error(
     data: &[u8],
     from: IpAddr,
@@ -290,6 +294,7 @@ fn parse_icmp_error(
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn parse_icmp_error_v4(
     data: &[u8],
     from: IpAddr,
@@ -339,6 +344,7 @@ fn parse_icmp_error_v4(
     })
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn parse_icmp_error_v6(
     data: &[u8],
     from: IpAddr,
@@ -386,6 +392,7 @@ fn icmp_reason(v6: bool, kind: u8, code: u8) -> &'static str {
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn strip_ipv4(data: &[u8], protocol: u8) -> Option<((Ipv4Addr, Ipv4Addr), &[u8])> {
     if data.len() < 20 || data[0] >> 4 != 4 || data[9] != protocol {
         return None;
@@ -403,6 +410,7 @@ fn strip_ipv4(data: &[u8], protocol: u8) -> Option<((Ipv4Addr, Ipv4Addr), &[u8])
     ))
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn parse_ipv4_addresses(data: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     if data.len() < 20 || data[0] >> 4 != 4 {
         return None;
@@ -413,6 +421,7 @@ fn parse_ipv4_addresses(data: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     ))
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn ipv6_transport_offset(payload: &[u8], protocol: u8) -> Option<usize> {
     if payload.len() < 40 || payload[0] >> 4 != 6 {
         return None;
@@ -543,8 +552,8 @@ fn recv_error(socket: &std::net::UdpSocket) -> io::Result<Option<IcmpError>> {
             if error.ee_origin == libc::SO_EE_ORIGIN_ICMP
                 || error.ee_origin == libc::SO_EE_ORIGIN_ICMP6
             {
-                let node = unsafe {
-                    let address = libc::SO_EE_OFFENDER(error);
+                let node = {
+                    let address = unsafe { libc::SO_EE_OFFENDER(error) };
                     if address.is_null() {
                         None
                     } else {
