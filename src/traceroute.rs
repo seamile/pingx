@@ -307,20 +307,23 @@ mod platform {
             .checked_sub(if target.is_ipv4() { 20 } else { 40 })
             .and_then(|value| value.checked_sub(probe_overhead))
             .ok_or_else(|| anyhow::anyhow!("traceroute packet size is too small"))?;
-        let result = run_probes(
-            socket.as_ref(),
-            ProbeRequest {
-                target,
-                local,
-                ident,
-                tcp_seed,
-                protocol,
-                base_port: trace_port,
-                payload_size,
-                max_hops,
-                timeout,
-            },
-            &mut reply_rx,
+        let result = run_until_interrupted(
+            run_probes(
+                socket.as_ref(),
+                ProbeRequest {
+                    target,
+                    local,
+                    ident,
+                    tcp_seed,
+                    protocol,
+                    base_port: trace_port,
+                    payload_size,
+                    max_hops,
+                    timeout,
+                },
+                &mut reply_rx,
+            ),
+            tokio::signal::ctrl_c(),
         )
         .await;
         receiver.abort();
@@ -509,6 +512,19 @@ mod platform {
             terminal_error,
             max_sent,
         })
+    }
+
+    async fn run_until_interrupted<T>(
+        operation: impl Future<Output = Result<T>>,
+        interrupt: impl Future<Output = io::Result<()>>,
+    ) -> Result<T> {
+        tokio::select! {
+            result = operation => result,
+            signal = interrupt => {
+                signal?;
+                anyhow::bail!("traceroute cancelled by user")
+            }
+        }
     }
 
     fn pending_for_hop(probes: &HashMap<u16, Probe>, target_hop: Option<u8>) -> Option<()> {
@@ -3304,6 +3320,20 @@ mod platform {
             assert_eq!(result.stop_hop, None);
             assert_eq!(result.max_sent, 2);
             assert!(result.probes.values().all(|probe| probe.reply.is_none()));
+        }
+
+        #[tokio::test]
+        async fn trace_interruption_reports_that_no_rows_were_rendered() {
+            let outcome = run_until_interrupted(
+                std::future::pending::<Result<()>>(),
+                std::future::ready(Ok(())),
+            )
+            .await;
+
+            assert_eq!(
+                outcome.unwrap_err().to_string(),
+                "traceroute cancelled by user"
+            );
         }
 
         #[tokio::test]
