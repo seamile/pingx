@@ -902,15 +902,13 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             state.protocol_version
         );
         let listener = activated_listener()?;
+        serve(listener, state).await
+    }
+
+    async fn serve(listener: UnixListener, state: HelperState) -> Result<()> {
         let mut sessions = tokio::task::JoinSet::new();
         loop {
-            while let Some(result) = sessions.try_join_next() {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => eprintln!("pingx-helper: {error:#}"),
-                    Err(error) => eprintln!("pingx-helper: session task failed: {error}"),
-                }
-            }
+            reap_sessions(&mut sessions);
             let accepted = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
             match accepted {
                 Ok(Ok((stream, _))) => {
@@ -918,8 +916,22 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                     sessions.spawn(async move { handle_connection(stream, &state).await });
                 }
                 Ok(Err(error)) => return Err(error).context("accept helper connection"),
-                Err(_) if sessions.is_empty() => return Ok(()),
-                Err(_) => {}
+                Err(_) => {
+                    reap_sessions(&mut sessions);
+                    if sessions.is_empty() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    fn reap_sessions(sessions: &mut tokio::task::JoinSet<Result<()>>) {
+        while let Some(result) = sessions.try_join_next() {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("pingx-helper: {error:#}"),
+                Err(error) => eprintln!("pingx-helper: session task failed: {error}"),
             }
         }
     }
@@ -2016,6 +2028,47 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 error.to_string().contains("protocol version mismatch"),
                 "{error:#}"
             );
+        }
+
+        #[tokio::test]
+        async fn daemon_exits_after_its_last_session() {
+            let path =
+                std::env::temp_dir().join(format!("pingx-helper-daemon-{}", std::process::id()));
+            let _ = fs::remove_file(&path);
+            let listener = UnixListener::bind(&path).unwrap();
+            let allowed_uid = unsafe { libc::geteuid() } as u32;
+            let state = HelperState {
+                protocol_version: PROTOCOL_VERSION,
+                allowed_uid,
+            };
+            let daemon = tokio::spawn(serve(listener, state));
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            write_frame(
+                &mut writer,
+                &Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    action: Action::Status,
+                },
+            )
+            .await
+            .unwrap();
+            drop(writer);
+            let mut reader = BufReader::new(reader);
+            let response = read_frame::<Response>(&mut reader, MAX_RESPONSE)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                response.result,
+                ResponseResult::Status { allowed_uid: reported } if reported == allowed_uid
+            ));
+            tokio::time::timeout(Duration::from_secs(4), daemon)
+                .await
+                .expect("daemon should exit after its last session")
+                .unwrap()
+                .unwrap();
+            let _ = fs::remove_file(&path);
         }
     }
 }
