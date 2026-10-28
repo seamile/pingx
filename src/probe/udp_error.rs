@@ -322,6 +322,53 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rejects_wrong_ports_and_truncated_icmp_references() {
+        let local = "192.0.2.1".parse::<Ipv4Addr>().unwrap();
+        let target = "198.51.100.2".parse::<Ipv4Addr>().unwrap();
+        let embedded = ipv4_udp_packet(local, target, 40000, 33434);
+        let icmp = icmp_error(ICMP_DEST_UNREACH_V4, 3, &embedded);
+
+        assert!(
+            parse_icmp_error(
+                &icmp,
+                target.into(),
+                local.into(),
+                target.into(),
+                40001,
+                33434,
+            )
+            .is_none()
+        );
+        assert!(
+            parse_icmp_error(
+                &icmp,
+                target.into(),
+                local.into(),
+                target.into(),
+                40000,
+                33435,
+            )
+            .is_none()
+        );
+        for length in [0, 19, 20, 27] {
+            let mut short = icmp[..8].to_vec();
+            short.extend_from_slice(&embedded[..length]);
+            assert!(
+                parse_icmp_error(
+                    &short,
+                    target.into(),
+                    local.into(),
+                    target.into(),
+                    40000,
+                    33434,
+                )
+                .is_none(),
+                "length {length}"
+            );
+        }
+    }
+
     fn icmp_error(kind: u8, code: u8, embedded: &[u8]) -> Vec<u8> {
         let mut icmp = vec![kind, code, 0, 0, 0, 0, 0, 0];
         icmp.extend_from_slice(embedded);
