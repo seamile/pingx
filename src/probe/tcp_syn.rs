@@ -651,7 +651,8 @@ fn parse_icmp_error_v4(
     {
         return None;
     }
-    let tcp = embedded.get(20..)?;
+    let header_len = usize::from(embedded[0] & 0x0f) * 4;
+    let tcp = embedded.get(header_len..)?;
     if tcp.len() < 4
         || u16::from_be_bytes([tcp[0], tcp[1]]) != source_port
         || u16::from_be_bytes([tcp[2], tcp[3]]) != target_port
@@ -1006,6 +1007,24 @@ mod tests {
         assert_network_error(
             parse_icmp_error(
                 &icmp_v4,
+                IpAddr::V4(router_v4),
+                IpAddr::V4(local_v4),
+                IpAddr::V4(target_v4),
+                40000,
+                443,
+            ),
+            router_v4.into(),
+        );
+        let mut probe_with_options = probe_v4.clone();
+        probe_with_options[0] = 0x46;
+        let total_length = (probe_with_options.len() + 4) as u16;
+        probe_with_options[2..4].copy_from_slice(&total_length.to_be_bytes());
+        probe_with_options.splice(20..20, [1, 1, 1, 1]);
+        let mut icmp_with_options = vec![ICMP_TIME_EXCEEDED_V4, 0, 0, 0, 0, 0, 0, 0];
+        icmp_with_options.extend_from_slice(&probe_with_options);
+        assert_network_error(
+            parse_icmp_error(
+                &icmp_with_options,
                 IpAddr::V4(router_v4),
                 IpAddr::V4(local_v4),
                 IpAddr::V4(target_v4),
