@@ -1199,12 +1199,18 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
     }
 
     fn read_state() -> Result<HelperState> {
-        let metadata = fs::symlink_metadata(STATE_PATH).context("helper state is missing")?;
+        let file = open_state(Path::new(STATE_PATH))?;
+        serde_json::from_reader(file).context("read helper state")
+    }
+
+    fn open_state(path: &Path) -> Result<File> {
+        let file = open_regular_file(path)?;
+        let metadata = file.metadata()?;
         anyhow::ensure!(
-            metadata.file_type().is_file() && metadata.uid() == 0,
+            metadata.uid() == 0,
             "helper state is not a root-owned regular file"
         );
-        serde_json::from_reader(File::open(STATE_PATH)?).context("read helper state")
+        Ok(file)
     }
 
     fn ensure_root_directory(path: &Path) -> Result<()> {
@@ -1219,15 +1225,16 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
     }
 
     fn open_executable(path: &Path) -> Result<File> {
+        open_regular_file(path).with_context(|| "current executable is not a regular file")
+    }
+
+    fn open_regular_file(path: &Path) -> Result<File> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .with_context(|| format!("open {}", path.display()))?;
-        anyhow::ensure!(
-            file.metadata()?.is_file(),
-            "current executable is not a regular file"
-        );
+        anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
         Ok(file)
     }
 
@@ -1543,6 +1550,23 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             fs::write(&file, "binary").unwrap();
             std::os::unix::fs::symlink(&file, &link).unwrap();
             assert!(open_executable(&link).is_err());
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn state_uses_the_opened_file_after_its_path_changes() {
+            let root = std::env::temp_dir()
+                .join(format!("pingx-helper-state-replace-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let path = root.join("helper.json");
+            fs::write(&path, br#"{"protocol_version":3,"allowed_uid":501}"#).unwrap();
+            let file = open_regular_file(&path).unwrap();
+            let replacement = root.join("replacement.json");
+            fs::write(&replacement, br#"{"protocol_version":3,"allowed_uid":123}"#).unwrap();
+            fs::rename(replacement, &path).unwrap();
+            let state = serde_json::from_reader::<_, HelperState>(file).unwrap();
+            assert_eq!(state.allowed_uid, 501);
             let _ = fs::remove_dir_all(&root);
         }
 
