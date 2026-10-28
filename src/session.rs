@@ -139,6 +139,14 @@ impl Session {
     }
 
     pub async fn run(&self) -> Result<()> {
+        self.run_impl(true).await
+    }
+
+    pub async fn run_json_only(&self) -> Result<()> {
+        self.run_impl(false).await
+    }
+
+    async fn run_impl(&self, show_headers: bool) -> Result<()> {
         let targets = &self.cli.targets;
         let multi_target = targets.len() > 1;
         let quiet = self.cli.quiet;
@@ -233,7 +241,9 @@ impl Session {
                         models::PingStats::new(target_string.clone(), target_addr),
                     );
 
-                    Self::print_header(target_string, target_addr, &protocol, self.cli.size);
+                    if show_headers {
+                        Self::print_header(target_string, target_addr, &protocol, self.cli.size);
+                    }
 
                     let config = crate::pinger::PingerConfig {
                         ttl: self.cli.ttl,

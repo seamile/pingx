@@ -605,8 +605,15 @@ mod macos {
         anyhow::ensure!(data.len() <= MAX_REQUEST, "helper request is too large");
         let operation: Operation = serde_json::from_slice(&data)?;
         validate_operation(&operation)?;
+        let json_only = matches!(
+            &operation,
+            Operation::Ping(PingOperation {
+                json_file: true,
+                ..
+            })
+        );
         let CliWithMode {
-            cli: parsed,
+            cli: mut parsed,
             traceroute,
         } = match operation {
             Operation::Ping(ping) => CliWithMode {
@@ -618,9 +625,14 @@ mod macos {
                 traceroute: true,
             },
         };
+        if json_only {
+            parsed.quiet = true;
+        }
         crate::utils::set_bind_interface(parsed.interface.clone());
         if traceroute {
             crate::traceroute::TraceSession::new(parsed).run().await
+        } else if json_only {
+            crate::session::Session::new(parsed).run_json_only().await
         } else {
             crate::session::Session::new(parsed).run().await
         }
