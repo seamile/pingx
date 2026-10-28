@@ -56,6 +56,7 @@ pub fn create_pinger(
             target_name,
             target,
             port,
+            config.ttl,
             config.timeout,
         )),
         Protocol::Udp(port) => Box::new(udp::UdpPinger::new(

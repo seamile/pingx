@@ -1,5 +1,5 @@
 use crate::cli::Protocol;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -148,7 +148,13 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
             } else {
                 80
             };
-            probe_tcp(addr, port).await
+            tokio::time::timeout(
+                PROBE_TIMEOUT,
+                crate::utils::connect_tcp(SocketAddr::new(addr, port)),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Timeout"))??;
+            Ok(())
         }
     }
 }
@@ -172,12 +178,20 @@ async fn probe_udp(addr: IpAddr, port: u16) -> Result<()> {
 }
 
 async fn probe_tcp(addr: IpAddr, port: u16) -> Result<()> {
-    let socket_addr = SocketAddr::new(addr, port);
-    tokio::time::timeout(PROBE_TIMEOUT, crate::utils::connect_tcp(socket_addr))
-        .await
-        .context("Timeout")?
-        .context("Connection failed")?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        crate::probe::tcp_syn::probe(addr, port, PROBE_TIMEOUT, 64)
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (addr, port);
+        Err(anyhow::anyhow!(
+            "TCP SYN address probing is not implemented on this platform"
+        ))
+    }
 }
 
 async fn probe_icmp(addr: IpAddr) -> Result<()> {

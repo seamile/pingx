@@ -153,18 +153,6 @@ pub fn bind_socket_to_interface(
     }
 }
 
-#[cfg(not(unix))]
-pub fn bind_socket_to_interface(
-    _socket: &socket2::Socket,
-    _iface: &str,
-    _is_ipv6: bool,
-) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "interface binding is not supported on this platform",
-    ))
-}
-
 pub async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
     if let Some(iface) = get_bind_interface() {
         connect_tcp_bound(addr, iface).await
@@ -188,17 +176,29 @@ async fn connect_tcp_bound(addr: SocketAddr, iface: &str) -> io::Result<TcpStrea
     let sockaddr: SockAddr = addr.into();
     match socket.connect(&sockaddr) {
         Ok(()) => {}
-        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
-        Err(e) => return Err(e),
+        Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
     }
     let stream: std::net::TcpStream = socket.into();
-    let tokio_stream = TcpStream::from_std(stream)?;
-    tokio_stream.writable().await?;
-    Ok(tokio_stream)
+    let stream = TcpStream::from_std(stream)?;
+    stream.writable().await?;
+    Ok(stream)
 }
 
 #[cfg(not(unix))]
 async fn connect_tcp_bound(_addr: SocketAddr, _iface: &str) -> io::Result<TcpStream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interface binding is not supported on this platform",
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn bind_socket_to_interface(
+    _socket: &socket2::Socket,
+    _iface: &str,
+    _is_ipv6: bool,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "interface binding is not supported on this platform",
@@ -253,43 +253,37 @@ pub fn get_interface_ips(_iface: &str) -> Vec<IpAddr> {
     Vec::new()
 }
 
+#[cfg(unix)]
+fn raw_protocol_for_cli(cli: &crate::cli::Cli) -> Result<Option<socket2::Protocol>> {
+    use crate::cli::Protocol;
+
+    if cli.traceroute {
+        return Ok(match cli.trace_target()?.protocol {
+            Protocol::Icmp => Some(socket2::Protocol::ICMPV4),
+            Protocol::Tcp(_) => Some(socket2::Protocol::TCP),
+            Protocol::Udp(_) if cfg!(target_os = "linux") => None,
+            Protocol::Udp(_) => Some(socket2::Protocol::ICMPV4),
+            Protocol::Http(_) => unreachable!("HTTP traceroute is rejected by target parsing"),
+        });
+    }
+
+    let mut needs_icmp = false;
+    for target in &cli.targets {
+        match cli.target_spec(target)?.protocol {
+            Protocol::Tcp(_) => return Ok(Some(socket2::Protocol::TCP)),
+            Protocol::Icmp => needs_icmp = true,
+            Protocol::Udp(_) if !cfg!(target_os = "linux") => needs_icmp = true,
+            Protocol::Udp(_) | Protocol::Http(_) => {}
+        }
+    }
+    Ok(needs_icmp.then_some(socket2::Protocol::ICMPV4))
+}
+
 #[cfg(target_os = "linux")]
 pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
-    if cli.traceroute {
-        let needs_raw_socket =
-            !matches!(cli.trace_target()?.protocol, crate::cli::Protocol::Udp(_));
-        if !needs_raw_socket {
-            return Ok(());
-        }
-    }
-    // Check whether any non-trace target needs ICMP and therefore a raw socket.
-    let needs_raw_socket = if cli.traceroute {
-        true
-    } else {
-        // Iterate over targets to check if any requires ICMP
-        let mut has_icmp = false;
-        for target in &cli.targets {
-            match detect_protocol(cli, target) {
-                Ok((protocol, _)) => {
-                    if let crate::cli::Protocol::Icmp = protocol {
-                        has_icmp = true;
-                        break;
-                    }
-                }
-                Err(_) => {
-                    // If detection fails, we might default to ICMP or error out later.
-                    // Assuming safe default: if we can't parse it as TCP/HTTP, it might be a hostname for ICMP.
-                    has_icmp = true;
-                    break;
-                }
-            }
-        }
-        has_icmp
-    };
-
-    if !needs_raw_socket {
+    let Some(raw_protocol) = raw_protocol_for_cli(cli)? else {
         return Ok(());
-    }
+    };
 
     use socket2::{Domain, Protocol, Socket, Type};
     use std::io::{self, Write};
@@ -309,12 +303,15 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
         false
     }
 
-    // Linux ICMP/TCP traceroute uses RAW sockets even when unprivileged ping is available.
-    if !cli.traceroute && Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok() {
+    if raw_protocol == Protocol::ICMPV4
+        && !cli.traceroute
+        && Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).is_ok()
+    {
         return Ok(());
     }
 
-    match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
+    let domain = if cli.ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    match Socket::new(domain, Type::RAW, Some(raw_protocol)) {
         Ok(_) => return Ok(()),
         Err(e) => {
             // If it's not a permission error, return it
@@ -401,7 +398,24 @@ pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
     Err(anyhow::anyhow!("Failed to restart process: {}", err))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
+    use socket2::{Domain, Socket, Type};
+
+    let Some(protocol) = raw_protocol_for_cli(cli)? else {
+        return Ok(());
+    };
+    let domain = if cli.ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    match Socket::new(domain, Type::RAW, Some(protocol)) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
+            "raw socket probing requires root privileges on macOS; run with sudo"
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub async fn check_and_acquire_privileges(_cli: &crate::cli::Cli) -> Result<()> {
     Ok(())
 }

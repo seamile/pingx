@@ -2,15 +2,15 @@ use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 
 pub struct TcpPinger {
     target_name: String,
     target: IpAddr,
     port: u16,
+    ttl: u32,
     timeout: std::time::Duration,
     result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
@@ -20,12 +20,14 @@ impl TcpPinger {
         target_name: String,
         target: IpAddr,
         port: u16,
+        ttl: u32,
         timeout: std::time::Duration,
     ) -> Self {
         Self {
             target_name,
             target,
             port,
+            ttl,
             timeout,
             result_tx: Arc::new(Mutex::new(None)),
         }
@@ -49,33 +51,14 @@ impl Pinger for TcpPinger {
             guard.clone().unwrap()
         };
 
-        let addr = SocketAddr::new(self.target, self.port);
         let timeout = self.timeout;
+        let ttl = self.ttl;
+        let port = self.port;
         let target_name = self.target_name.clone();
         let target = self.target;
 
         tokio::spawn(async move {
-            let start = Instant::now();
-            let connect_future = crate::utils::connect_tcp(addr);
-            let result = tokio::time::timeout(timeout, connect_future).await;
-
-            let status = match result {
-                Ok(Ok(_stream)) => ProbeStatus::Success(ResponseType::TcpOpen),
-                Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    ProbeStatus::Success(ResponseType::TcpClosed)
-                }
-                Ok(Err(error)) => ProbeStatus::NetworkError {
-                    node: None,
-                    reason: error.to_string(),
-                },
-                Err(_) => ProbeStatus::Timeout,
-            };
-
-            let rtt = if matches!(status, ProbeStatus::Success(_)) {
-                start.elapsed()
-            } else {
-                std::time::Duration::ZERO
-            };
+            let (status, rtt) = probe(target, port, timeout, ttl).await;
 
             let _ = result_tx
                 .send(PingResult {
@@ -96,4 +79,45 @@ impl Pinger for TcpPinger {
     async fn stop(&mut self) -> Result<()> {
         Ok(())
     }
+}
+
+#[cfg(unix)]
+async fn probe(
+    target: IpAddr,
+    port: u16,
+    timeout: std::time::Duration,
+    ttl: u32,
+) -> (ProbeStatus, std::time::Duration) {
+    use crate::probe::tcp_syn::{self, TcpSynFailure, TcpSynKind};
+
+    match tcp_syn::probe(target, port, timeout, ttl).await {
+        Ok(reply) => (
+            ProbeStatus::Success(match reply.kind {
+                TcpSynKind::Open => ResponseType::TcpOpen,
+                TcpSynKind::Closed => ResponseType::TcpClosed,
+            }),
+            reply.rtt,
+        ),
+        Err(TcpSynFailure::Timeout) => (ProbeStatus::Timeout, std::time::Duration::ZERO),
+        Err(TcpSynFailure::Network { node, reason }) => (
+            ProbeStatus::NetworkError { node, reason },
+            std::time::Duration::ZERO,
+        ),
+        Err(TcpSynFailure::Local(error)) => {
+            (ProbeStatus::LocalError(error), std::time::Duration::ZERO)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn probe(
+    _target: IpAddr,
+    _port: u16,
+    _timeout: std::time::Duration,
+    _ttl: u32,
+) -> (ProbeStatus, std::time::Duration) {
+    (
+        ProbeStatus::LocalError("TCP SYN ping is not implemented on this platform".to_string()),
+        std::time::Duration::ZERO,
+    )
 }
