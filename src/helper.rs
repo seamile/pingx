@@ -1311,13 +1311,17 @@ mod macos {
     }
 
     fn finalize_install(staged: &mut [StagedInstall]) -> Result<()> {
-        for item in staged {
+        for item in staged.iter_mut() {
             item.installed = false;
+        }
+        for item in staged {
             if let Some(backup) = item.backup.take() {
                 match fs::remove_file(backup) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).context("remove previous helper file"),
+                    Err(error) => {
+                        return Err(error).context("remove previous helper file");
+                    }
                 }
             }
             let _ = fs::remove_file(&item.temporary);
