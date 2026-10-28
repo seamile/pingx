@@ -740,26 +740,28 @@ mod macos {
         );
 
         let helper = Path::new(HELPER_PATH);
-        ensure_root_directory(helper.parent().unwrap())?;
-        let mut input = File::open(&source).context("open helper source")?;
-        atomic_install(helper, 0o755, |output| {
-            io::copy(&mut input, output).map(|_| ())
-        })?;
+        let helper_dir = helper.parent().unwrap();
+        ensure_root_directory(helper_dir)?;
+        ensure_root_directory(Path::new("/Library/LaunchDaemons"))?;
+        ensure_root_directory(Path::new(STATE_DIR))?;
 
         let plist = launchd_plist(allowed_uid)?;
-        ensure_root_directory(Path::new("/Library/LaunchDaemons"))?;
-        atomic_install(Path::new(PLIST_PATH), 0o644, |output| {
-            output.write_all(plist.as_bytes())
-        })?;
-
-        ensure_root_directory(Path::new(STATE_DIR))?;
         let state = serde_json::to_vec_pretty(&HelperState {
             protocol_version: PROTOCOL_VERSION,
             allowed_uid,
         })?;
-        atomic_install(Path::new(STATE_PATH), 0o644, |output| {
+        let mut staged = Vec::new();
+        let mut input = File::open(&source).context("open helper source")?;
+        stage_install(&mut staged, helper, 0o755, |output| {
+            io::copy(&mut input, output).map(|_| ())
+        })?;
+        stage_install(&mut staged, Path::new(PLIST_PATH), 0o644, |output| {
+            output.write_all(plist.as_bytes())
+        })?;
+        stage_install(&mut staged, Path::new(STATE_PATH), 0o644, |output| {
             output.write_all(&state)
         })?;
+        commit_install(&mut staged)?;
 
         let _ = Command::new("launchctl")
             .args(["bootout", &format!("system/{LABEL}")])
@@ -1139,19 +1141,52 @@ mod macos {
         Ok(())
     }
 
-    fn atomic_install<F>(path: &Path, mode: u32, write: F) -> Result<()>
+    struct StagedInstall {
+        target: PathBuf,
+        temporary: PathBuf,
+        backup: Option<PathBuf>,
+    }
+
+    impl StagedInstall {
+        fn restore(&mut self) {
+            if let Some(backup) = self.backup.take() {
+                let _ = fs::rename(backup, &self.target);
+            }
+        }
+    }
+
+    impl Drop for StagedInstall {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.temporary);
+            self.restore();
+        }
+    }
+
+    fn stage_install<F>(
+        staged: &mut Vec<StagedInstall>,
+        path: &Path,
+        mode: u32,
+        write: F,
+    ) -> Result<()>
     where
         F: FnOnce(&mut File) -> io::Result<()>,
     {
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("invalid installation path {}", path.display()))?;
-        let temporary = parent.join(format!(".{}.tmp.{}", LABEL, std::process::id()));
-        match fs::remove_file(&temporary) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("remove {}", temporary.display()));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid installation filename {}", path.display()))?;
+        let temporary = parent.join(format!(".{LABEL}.{name}.tmp.{}", std::process::id()));
+        let backup = parent.join(format!(".{LABEL}.{name}.old.{}", std::process::id()));
+        for path in [&temporary, &backup] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", path.display()));
+                }
             }
         }
         let mut output = OpenOptions::new()
@@ -1165,9 +1200,54 @@ mod macos {
         output.sync_all()?;
         output.set_permissions(fs::Permissions::from_mode(mode))?;
         drop(output);
-        fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
-        File::open(parent)?.sync_all()?;
+        staged.push(StagedInstall {
+            target: path.to_path_buf(),
+            temporary,
+            backup: None,
+        });
         Ok(())
+    }
+
+    fn commit_install(staged: &mut [StagedInstall]) -> Result<()> {
+        for (replaced, item) in staged.iter_mut().enumerate() {
+            let backup = item.temporary.with_extension("old");
+            let target = item.target.clone();
+            item.backup = match fs::rename(&target, &backup) {
+                Ok(()) => Some(backup),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("back up {}", target.display()));
+                }
+            };
+            if let Err(error) = fs::rename(&item.temporary, &target) {
+                if let Some(backup) = &item.backup {
+                    let _ = fs::rename(backup, &target);
+                }
+                rollback_install(&mut staged[..replaced]);
+                return Err(error).with_context(|| format!("replace {}", target.display()));
+            }
+            File::open(target.parent().unwrap())?
+                .sync_all()
+                .with_context(|| format!("sync {}", target.display()))?;
+        }
+        for item in staged {
+            if let Some(backup) = item.backup.take() {
+                match fs::remove_file(backup) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("remove previous helper file"),
+                }
+            }
+            let _ = fs::remove_file(&item.temporary);
+        }
+        Ok(())
+    }
+
+    fn rollback_install(staged: &mut [StagedInstall]) {
+        for item in staged.iter_mut().rev() {
+            item.restore();
+            let _ = fs::remove_file(&item.temporary);
+        }
     }
 
     fn launchd_plist(allowed_uid: u32) -> Result<String> {
@@ -1290,6 +1370,74 @@ mod macos {
             };
             let data = serde_json::to_vec(&state).unwrap();
             assert_eq!(serde_json::from_slice::<HelperState>(&data).unwrap(), state);
+        }
+
+        fn temporary_files(paths: &[&Path]) -> Vec<PathBuf> {
+            paths
+                .iter()
+                .flat_map(|path| {
+                    let parent = path.parent().unwrap();
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    ["tmp", "old"].map(|suffix| {
+                        parent.join(format!(".{LABEL}.{name}.{suffix}.{}", std::process::id()))
+                    })
+                })
+                .collect()
+        }
+
+        #[test]
+        fn staged_install_replaces_all_files() {
+            let root =
+                std::env::temp_dir().join(format!("pingx-helper-install-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let paths = [root.join("helper"), root.join("plist"), root.join("state")];
+            for (index, path) in paths.iter().enumerate() {
+                fs::write(path, format!("old {index}")).unwrap();
+            }
+            let mut staged = Vec::new();
+            for (index, path) in paths.iter().enumerate() {
+                stage_install(&mut staged, path, 0o644, |output| {
+                    output.write_all(format!("new {index}").as_bytes())
+                })
+                .unwrap();
+            }
+            commit_install(&mut staged).unwrap();
+            for (index, path) in paths.iter().enumerate() {
+                assert_eq!(fs::read_to_string(path).unwrap(), format!("new {index}"));
+            }
+            assert!(
+                temporary_files(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+                    .iter()
+                    .all(|path| !path.exists())
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn staged_install_rolls_back_a_failed_commit() {
+            let root =
+                std::env::temp_dir().join(format!("pingx-helper-rollback-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let paths = [root.join("first"), root.join("second")];
+            fs::write(&paths[0], "old first").unwrap();
+            fs::write(&paths[1], "old second").unwrap();
+            let mut staged = Vec::new();
+            stage_install(&mut staged, &paths[0], 0o644, |output| {
+                output.write_all(b"new first")
+            })
+            .unwrap();
+            stage_install(&mut staged, &paths[1], 0o644, |output| {
+                output.write_all(b"new second")
+            })
+            .unwrap();
+            fs::remove_file(&paths[1]).unwrap();
+            staged[1].temporary = root.join("missing");
+            assert!(commit_install(&mut staged).is_err());
+            assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "old first");
+            assert!(!paths[1].exists());
+            let _ = fs::remove_dir_all(&root);
         }
 
         #[test]
