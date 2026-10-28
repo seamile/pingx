@@ -1127,7 +1127,7 @@ mod platform {
         let filter = if target.is_ipv6() {
             let tcp = (protocol == TraceProtocol::Tcp).then(|| {
                 format!(
-                    " or (tcp and ipv6.SrcAddr == {target} and tcp.SrcPort == {trace_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
+                    " or (tcp and ipv6.SrcAddr == {target} and ipv6.DstAddr == {local} and tcp.SrcPort == {trace_port} and tcp.DstPort != 0 and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
                 )
             });
             format!(
@@ -1137,7 +1137,7 @@ mod platform {
         } else {
             let tcp = (protocol == TraceProtocol::Tcp).then(|| {
                 format!(
-                    " or (tcp and ip.SrcAddr == {target} and tcp.SrcPort == {trace_port} and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
+                    " or (tcp and ip.SrcAddr == {target} and ip.DstAddr == {local} and tcp.SrcPort == {trace_port} and tcp.DstPort != 0 and ((tcp.SYN and tcp.ACK) or (tcp.RST and tcp.ACK)))"
                 )
             });
             format!(
@@ -2809,6 +2809,8 @@ mod platform {
             assert!(filter.contains("icmp.Type == 11"));
             assert!(filter.contains("ip.SrcAddr == 198.51.100.20"));
             assert!(filter.contains("tcp.SrcPort == 443"));
+            assert!(filter.contains("ip.DstAddr == 192.0.2.10"));
+            assert!(filter.contains("tcp.DstPort != 0"));
             assert!(filter.contains("tcp.SYN and tcp.ACK"));
         }
 
