@@ -974,9 +974,8 @@ mod macos {
         writer: &mut tokio::net::unix::OwnedWriteHalf,
     ) -> Result<Option<i32>> {
         validate_operation(&operation)?;
-        let traceroute = matches!(&operation, Operation::Trace(_));
         let current_exe = std::env::current_exe().context("resolve helper executable")?;
-        let mut child = tokio::process::Command::new(current_exe)
+        let child = tokio::process::Command::new(current_exe)
             .arg(super::INTERNAL_WORKER_ARG)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -984,6 +983,16 @@ mod macos {
             .kill_on_drop(true)
             .spawn()
             .context("start probe worker")?;
+        run_operation_with_child(operation, client_reader, writer, child).await
+    }
+
+    async fn run_operation_with_child(
+        operation: Operation,
+        client_reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        mut child: tokio::process::Child,
+    ) -> Result<Option<i32>> {
+        let traceroute = matches!(&operation, Operation::Trace(_));
         let mut input = child
             .stdin
             .take()
@@ -1674,6 +1683,62 @@ mod macos {
         fn worker_json_output_cannot_choose_a_file_path() {
             let cli = ping_operation().to_cli();
             assert_eq!(cli.json, Some(None));
+        }
+
+        fn sleeping_worker() -> tokio::process::Child {
+            tokio::process::Command::new("/bin/sleep")
+                .arg("60")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn client_disconnect_terminates_the_worker() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (reader, mut writer) = server.into_split();
+            let mut client_reader = BufReader::new(reader);
+            drop(client);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                run_operation_with_child(
+                    Operation::Ping(ping_operation()),
+                    &mut client_reader,
+                    &mut writer,
+                    sleeping_worker(),
+                ),
+            )
+            .await
+            .expect("disconnect should stop the worker promptly")
+            .unwrap();
+            assert_eq!(result, None);
+        }
+
+        #[tokio::test]
+        async fn client_cancel_terminates_the_worker() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (reader, mut writer) = server.into_split();
+            let (_, mut client_writer) = client.into_split();
+            write_frame(&mut client_writer, &ClientControl::Cancel)
+                .await
+                .unwrap();
+            let mut client_reader = BufReader::new(reader);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                run_operation_with_child(
+                    Operation::Ping(ping_operation()),
+                    &mut client_reader,
+                    &mut writer,
+                    sleeping_worker(),
+                ),
+            )
+            .await
+            .expect("cancel should stop the worker promptly")
+            .unwrap();
+            assert_eq!(result, Some(130));
         }
 
         #[test]
