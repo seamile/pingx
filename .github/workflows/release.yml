@@ -43,13 +43,27 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: Test
         run: cargo test --release --target ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Download WinDivert
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'WinDivert-2.2.2-A.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'windivert'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip' `
+            -OutFile $archive
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = '63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15'
+          if ($actual -ne $expected) { throw "WinDivert checksum mismatch: $actual" }
+          Expand-Archive -Path $archive -DestinationPath $destination
 
       - name: Package (POSIX)
         if: matrix.os != 'windows-latest'
@@ -59,9 +73,21 @@ jobs:
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          $stage = Join-Path $env:RUNNER_TEMP 'pingx-windows-x86_64'
+          $windivert = Join-Path $env:RUNNER_TEMP 'windivert/WinDivert-2.2.2-A'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" $stage
+          Copy-Item "$windivert/x64/WinDivert.dll" $stage
+          Copy-Item "$windivert/x64/WinDivert64.sys" $stage
+          Copy-Item "$windivert/LICENSE" "$stage/WinDivert-LICENSE.txt"
+          Copy-Item "$windivert/README" "$stage/WinDivert-README.txt"
+          Copy-Item "$windivert/VERSION" "$stage/WinDivert-VERSION.txt"
+          Copy-Item 'docs/WINDIVERT.md' "$stage/WINDIVERT.md"
+          Copy-Item 'LICENSE' "$stage/LICENSE.txt"
+          Copy-Item 'README.md' $stage
+          7z a "${{ matrix.asset_name }}" "$stage/*"
 
       - name: Upload Artifacts
         uses: softprops/action-gh-release@v2

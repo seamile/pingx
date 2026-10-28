@@ -2,7 +2,7 @@
 
 [🇬🇧 English](#pingx) ⇌ [🇨🇳 中文](#pingx-中文)
 
-PingX is a simple and practical network diagnostic tool designed to replace system `ping` and `ping6` commands. It supports **ICMP Ping**, **TCP Ping** (via SYN handshake), and **HTTP Ping** (via HEAD requests), allowing for comprehensive connectivity testing across IPv4 and IPv6.
+PingX is a practical network diagnostic CLI for **ICMP**, **half-open TCP SYN**, **UDP**, and **HTTP** probing. It supports IPv4 and IPv6 Ping, GeoIP, JSON output, interface binding on Unix, and ICMP/UDP/TCP traceroute on Linux, macOS, and x86_64 Windows.
 
 ## Features
 
@@ -12,6 +12,7 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 4. **GeoIP**: Retrieve geographical location (country, region, city, coordinates) for IP addresses.
 5. **JSON Output**: Export results to JSON for machine readability.
 6. **Interface Binding**: Bind all probes to a specific network interface (e.g., `en0`, `eth0`, `utun1`).
+7. **Traceroute**: Trace ICMP, UDP, or half-open TCP paths with per-hop RTTs and multiple responding nodes.
 
 ## Installation
 
@@ -32,6 +33,12 @@ sudo setcap cap_net_raw+ep $(which pingx)
 ```
 
 **Note**: The permissions will be lost if you reinstall or recompile pingx. You'll need to run the command again.
+
+### Windows Requirements
+
+The Windows release ZIP already includes the required WinDivert 2.2.2 x64 runtime. For a `cargo install` build, follow [docs/WINDIVERT.md](docs/WINDIVERT.md): download the pinned official archive, verify its SHA-256, and place `WinDivert.dll` and `WinDivert64.sys` beside `pingx.exe`.
+
+Windows UDP/TCP Ping and all traceroute modes require an Administrator terminal. ICMP Ping uses the Windows IP Helper API and does not load WinDivert. Interface binding with `-I` is not supported on Windows.
 
 ## Usage
 
@@ -95,7 +102,7 @@ pingx -I en0 223.5.5.5
 pingx --interface utun1 223.5.5.5:443
 ```
 
-**Note**: On macOS, other protocol modes (ICMP/TCP/HTTP) support interface binding, but traceroute also needs a RAW socket and may still require `sudo`. On Linux, ICMP/TCP binding is fully supported via `SO_BINDTODEVICE`; HTTP is supported with `local_address()` (source IP binding, best-effort). Windows is not supported.
+**Note**: Interface binding is implemented on Unix. On Linux, ICMP/TCP binding uses `SO_BINDTODEVICE`; HTTP uses source-address binding as a best-effort fallback. macOS traceroute still requires RAW privileges. Windows does not support `-I` in this release.
 
 ### Concurrent Probing
 
@@ -119,16 +126,23 @@ pingx -R -I en0 example.com
 pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
 pingx -R -T 1.1.1.1:443
+pingx -R -6 -T '[2001:db8::1]:443'
 pingx -R -U 1.1.1.1:33434
 ```
 
-Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP 40 bytes (IPv4).
+Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP 40/60 bytes. TCP traceroute packet length is fixed at those values; passing a different `PACKET_LEN` is an error.
 
-`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP. `-T` forces TCP and defaults to port 80; `-U` forces UDP and defaults to base port 33434. `-4` and `-6` only restrict the resolved address family. Use `[IPv6]:PORT` for IPv6 ports. UDP probes use successive destination ports; TCP probes use successive source ports. TCP traceroute currently supports IPv4 only. There is no separate port option.
+`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP. `-T` forces TCP and defaults to port 80; `-U` forces UDP and defaults to base port 33434. `-4` and `-6` only restrict the resolved address family. Use `[IPv6]:PORT` for IPv6 ports. UDP probes use successive destination ports; TCP probes use successive source ports. There is no separate port option.
 
-Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. RTT is shown as `min/avg/max`; `*` marks an incomplete set of replies. A hop with no replies shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size.
+Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. Each displayed RTT is the average of matching replies, and a fully unanswered hop shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size for ICMP and UDP.
 
-ICMP and TCP traceroute require RAW socket privileges (`sudo` or `CAP_NET_RAW`). Linux UDP traceroute reads ICMP errors from the socket error queue and does not require RAW privileges. macOS UDP traceroute uses a RAW ICMP receiver and therefore needs privileges as well. There is no traceroute support on Windows. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
+On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads ICMP errors from the socket error queue and does not require RAW privileges. On macOS, all traceroute modes require root/RAW privileges. On Windows, all traceroute modes require an Administrator terminal and the WinDivert runtime beside `pingx.exe`. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
+
+### Response Semantics
+
+TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `open`; an RST is reported as `closed` and still counts as a received response with its RTT. UDP application replies and target Port Unreachable errors also count as received. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
+
+JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state.
 
 ### GeoIP Lookup
 
@@ -164,11 +178,12 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: Stop running after deadline seconds.
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
 - `-t <TTL>`: Set the IP Time to Live (default 64).
-- `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
+- `-s <SIZE>`: Size of ICMP or UDP payload in bytes (default 56); TCP probes ignore it.
 - `--max-hops <N>`: Traceroute hop limit (default 64; `-R` only).
+- `-T` / `--tcp`: Use half-open TCP SYN probing (default port 80).
 - `-U` / `--udp`: Use UDP (default port 33434).
 - `HOST:PORT`: TCP target port, or UDP port when `-U` is set; use `[IPv6]:PORT` for IPv6.
-- `-I <IFACE>`: Specify network interface to bind to (e.g., `en0`, `eth0`, `utun1`).
+- `-I <IFACE>`: Specify a Unix network interface to bind to (e.g., `en0`, `eth0`, `utun1`); unavailable on Windows.
 - `-q`: Quiet output. Only displays summary statistics.
 
 ---
@@ -177,7 +192,7 @@ pingx -g 8.8.8.8 --json
 
 [🇨🇳 中文](#pingx-中文) ⇌ [🇬🇧 English](#pingx)
 
-PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 和 `ping6` 命令。它不仅支持标准的 **ICMP Ping**，还支持 **TCP Ping**（发送 SYN 握手报文）和 **HTTP Ping**（发送 HEAD 请求），可对 IPv4 和 IPv6 目标进行全面的连通性测试。
+PingX 是一款实用的网络诊断命令行工具，支持 **ICMP**、**半开 TCP SYN**、**UDP** 和 **HTTP** 探测，覆盖 IPv4/IPv6 Ping、GeoIP、JSON 输出，以及 Linux、macOS 和 x86_64 Windows 上的 ICMP/UDP/TCP 路由追踪。
 
 ## 特性
 
@@ -187,6 +202,7 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 4. **GeoIP 信息**: 获取 IP 地址的物理地理位置（国家、地区、城市、经纬度）。
 5. **JSON 输出**: 支持将探测或定位结果以 JSON 格式输出，方便集成。
 6. **网卡绑定**: 将探测流量绑定到指定网络接口（如 `en0`、`eth0`、`utun1`）。
+7. **路由追踪**: 追踪 ICMP、UDP 或半开 TCP 路径，并按跳显示 RTT 和多个响应节点。
 
 ## 安装
 
@@ -207,6 +223,12 @@ sudo setcap cap_net_raw+ep $(which pingx)
 ```
 
 **注意**：如果重新安装或重新编译 pingx，权限将会丢失，需要重新运行上述命令。
+
+### Windows 运行依赖
+
+Windows 发布 ZIP 已包含所需的 WinDivert 2.2.2 x64 运行文件。使用 `cargo install` 安装时，请按 [docs/WINDIVERT.md](docs/WINDIVERT.md) 下载固定版本的官方压缩包、校验 SHA-256，并将 `WinDivert.dll` 与 `WinDivert64.sys` 放到 `pingx.exe` 同目录。
+
+Windows 的 UDP/TCP Ping 和所有路由追踪模式需要管理员终端。ICMP Ping 使用 Windows IP Helper API，不加载 WinDivert。Windows 暂不支持 `-I` 网卡绑定。
 
 ## 用法
 
@@ -271,7 +293,7 @@ pingx -I en0 223.5.5.5
 pingx --interface utun1 223.5.5.5:443
 ```
 
-**注意**：macOS 下其他协议模式（ICMP/TCP/HTTP）支持网卡绑定，但路由追踪还需要 RAW socket，仍可能要使用 `sudo`。Linux 下 ICMP/TCP 通过 `SO_BINDTODEVICE` 完整支持，HTTP 通过 `local_address()` 绑定源 IP（尽力而为）。Windows 暂不支持。
+**注意**：网卡绑定目前实现于 Unix。Linux 的 ICMP/TCP 通过 `SO_BINDTODEVICE` 绑定，HTTP 通过源地址绑定作为尽力而为的回退方案。macOS 路由追踪仍需要 RAW 权限。Windows 当前版本不支持 `-I`。
 
 ### 并发探测
 
@@ -295,14 +317,21 @@ pingx -R -I en0 example.com
 pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
 pingx -R -T 1.1.1.1:443
+pingx -R -6 -T '[2001:db8::1]:443'
 pingx -R -U 1.1.1.1:33434
 ```
 
-`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP。`-T` 强制 TCP 且省略端口时默认 80，`-U` 强制 UDP 且省略端口时默认基础端口 33434。`-4` 和 `-6` 只限制地址族。IPv6 带端口使用 `[IPv6]:PORT`。UDP 使用递增的目的端口，TCP 使用递增的源端口。TCP 路由追踪目前仅支持 IPv4，不提供独立端口参数。
+`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP。`-T` 强制 TCP 且省略端口时默认 80，`-U` 强制 UDP 且省略端口时默认基础端口 33434。`-4` 和 `-6` 只限制地址族。IPv6 带端口使用 `[IPv6]:PORT`。UDP 使用递增的目的端口，TCP 使用递增的源端口。不提供独立端口参数。
 
-每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。RTT 显示为 `min/avg/max`；探测未全部返回时追加 `*`。无响应的跳在 IP 和 RTT 列都显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40 字节（IPv4）。
+每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。每个显示值是对应响应的平均 RTT；整跳无响应时在 IP 和 RTT 列显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 ICMP/UDP 的 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40/60 字节。TCP 路由追踪包长固定，显式传入其他值会报错。
 
-ICMP 和 TCP 路由追踪需要 RAW socket 权限（`sudo` 或 `CAP_NET_RAW`）。Linux UDP 路由追踪从 socket 错误队列读取 ICMP 错误，不需要 RAW 权限；macOS UDP 路由追踪使用 RAW ICMP 接收端，同样需要权限。Windows 不支持路由追踪。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
+Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错误队列读取 ICMP 错误，不需要 RAW 权限。macOS 的所有路由追踪模式需要 root/RAW 权限。Windows 的所有路由追踪模式需要管理员终端，并将 WinDivert 运行文件放在 `pingx.exe` 同目录。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
+
+### 响应语义
+
+TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `open`；收到 RST 显示 `closed`，仍计为成功响应并记录 RTT。UDP 应用响应和目标返回的 Port Unreachable 也都计入成功响应。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
+
+JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。
 
 ### GeoIP 位置查询
 
@@ -338,9 +367,10 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
-- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节）。
+- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节）；TCP 探测忽略该参数。
 - `--max-hops <N>`: 路由追踪最大跳数（默认 64，仅用于 `-R`）。
+- `-T` / `--tcp`: 使用半开 TCP SYN 探测（默认端口 80）。
 - `-U` / `--udp`: 使用 UDP（默认端口 33434）。
 - `HOST:PORT`：TCP 目标端口，或配合 `-U` 设置 UDP 端口；IPv6 使用 `[IPv6]:PORT`。
-- `-I <IFACE>`: 指定探测流量从哪个网卡接口发送（如 `en0`、`eth0`、`utun1`）。
+- `-I <IFACE>`: 指定 Unix 网卡接口（如 `en0`、`eth0`、`utun1`）；Windows 不可用。
 - `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。

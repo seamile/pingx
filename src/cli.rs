@@ -4,7 +4,13 @@ use std::time::Duration;
 pub use crate::probe::{Protocol, ProtocolMode, TargetSpec};
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "A versatile network diagnostic tool to replace system ping/ping6.", long_about = None)]
+#[command(
+    author,
+    version,
+    about = "A versatile network diagnostic tool to replace system ping/ping6.",
+    long_about = None,
+    after_help = "TCP probes send a half-open SYN; SYN-ACK means open and RST means closed. Closed or rejected TCP/UDP ports count as received responses. Unix TCP and macOS UDP traceroute require RAW privileges; Windows UDP/TCP Ping and traceroute require Administrator access and WinDivert.dll plus WinDivert64.sys beside pingx.exe."
+)]
 pub struct Cli {
     /// Targets. In traceroute mode: HOST[:PORT] [PACKET_LEN]; use [IPv6]:PORT for IPv6 ports.
     #[arg(required_unless_present = "fetch_geo")]
@@ -60,7 +66,7 @@ pub struct Cli {
     #[arg(short = 'q', conflicts_with = "traceroute")]
     pub quiet: bool,
 
-    /// Use this network interface for DNS, probes, HTTP, and GeoIP.
+    /// Use this network interface for DNS, probes, HTTP, and GeoIP (Unix only).
     #[arg(short = 'I', long = "interface", value_name = "IFACE")]
     pub interface: Option<String>,
 
