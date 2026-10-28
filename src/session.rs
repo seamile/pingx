@@ -150,6 +150,7 @@ impl Session {
         let targets = &self.cli.targets;
         let multi_target = targets.len() > 1;
         let quiet = self.cli.quiet;
+        let json_stdout = matches!(self.cli.json.as_ref(), Some(None));
 
         let headers = crate::utils::parse_headers(&self.cli.headers)?;
 
@@ -241,7 +242,7 @@ impl Session {
                         models::PingStats::new(target_string.clone(), target_addr),
                     );
 
-                    if show_headers {
+                    if show_headers && !json_stdout {
                         Self::print_header(target_string, target_addr, &protocol, self.cli.size);
                     }
 
@@ -340,7 +341,7 @@ impl Session {
                     if let Some(stats) = all_stats.get_mut(&result.target) {
                         stats.update(&result);
                     }
-                    if !quiet {
+                    if !quiet && !json_stdout {
                         let protocol = target_protocols.get(&result.target).unwrap_or(&crate::cli::Protocol::Icmp);
                         Self::print_result(&result, protocol);
                     }
