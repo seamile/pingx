@@ -764,27 +764,32 @@ mod macos {
             output.write_all(&state)
         })?;
         let service_was_loaded = stop_helper_service()?;
-        activate_install(&mut staged, service_was_loaded, start_helper_service)?;
+        activate_install(
+            &mut staged,
+            || restore_helper_service(service_was_loaded),
+            start_helper_service,
+        )?;
         println!("PingX helper installed for UID {allowed_uid}");
         Ok(())
     }
 
-    fn activate_install<F>(
+    fn activate_install<F, G>(
         staged: &mut [StagedInstall],
-        service_was_loaded: bool,
+        restore_service: G,
         mut start_service: F,
     ) -> Result<()>
     where
         F: FnMut() -> Result<()>,
+        G: FnOnce() -> Result<()>,
     {
         if let Err(error) = commit_install(staged) {
-            restore_helper_service(service_was_loaded)?;
+            rollback_install(staged);
+            restore_service()?;
             return Err(error);
         }
         if let Err(error) = start_service() {
             rollback_install(staged);
-            restore_helper_service(service_was_loaded)
-                .context("restore the previous helper service")?;
+            restore_service().context("restore the previous helper service")?;
             return Err(error);
         }
         finalize_install(staged)
@@ -1608,10 +1613,14 @@ mod macos {
 
             let mut restored_service = false;
             assert!(
-                activate_install(&mut staged, true, || {
-                    restored_service = true;
-                    anyhow::bail!("service did not start")
-                })
+                activate_install(
+                    &mut staged,
+                    || Ok(()),
+                    || {
+                        restored_service = true;
+                        anyhow::bail!("service did not start")
+                    }
+                )
                 .is_err()
             );
             assert!(restored_service);
@@ -1621,6 +1630,43 @@ mod macos {
                     .iter()
                     .all(|path| !path.exists())
             );
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn failed_commit_restores_files_before_the_previous_service() {
+            let root = std::env::temp_dir()
+                .join(format!("pingx-helper-commit-order-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let paths = [root.join("first"), root.join("second")];
+            fs::write(&paths[0], "old first").unwrap();
+            fs::write(&paths[1], "old second").unwrap();
+            let mut staged = Vec::new();
+            for (index, path) in paths.iter().enumerate() {
+                stage_install(&mut staged, path, 0o644, |output| {
+                    output.write_all(format!("new {index}").as_bytes())
+                })
+                .unwrap();
+            }
+            staged[1].backup_path = root.join("blocked");
+            fs::create_dir(&staged[1].backup_path).unwrap();
+
+            let mut service_restored = false;
+            assert!(
+                activate_install(
+                    &mut staged,
+                    || {
+                        service_restored = true;
+                        assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "old first");
+                        assert_eq!(fs::read_to_string(&paths[1]).unwrap(), "old second");
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .is_err()
+            );
+            assert!(service_restored);
             let _ = fs::remove_dir_all(&root);
         }
 
