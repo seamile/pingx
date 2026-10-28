@@ -75,6 +75,7 @@ pub(crate) fn classify_icmp(error: IcmpError, target: IpAddr) -> UdpIcmpError {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 pub(crate) fn parse_icmp_error(
     data: &[u8],
     from: IpAddr,
@@ -89,6 +90,7 @@ pub(crate) fn parse_icmp_error(
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_icmp_error_v4(
     data: &[u8],
     from: IpAddr,
@@ -138,6 +140,7 @@ fn parse_icmp_error_v4(
     })
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_icmp_error_v6(
     data: &[u8],
     from: IpAddr,
@@ -196,6 +199,7 @@ fn icmp_reason(v6: bool, kind: u8, code: u8) -> &'static str {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn strip_ipv4(data: &[u8], protocol: u8) -> Option<((Ipv4Addr, Ipv4Addr), &[u8])> {
     if data.len() < 20 || data[0] >> 4 != 4 || data[9] != protocol {
         return None;
@@ -213,6 +217,7 @@ fn strip_ipv4(data: &[u8], protocol: u8) -> Option<((Ipv4Addr, Ipv4Addr), &[u8])
     ))
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_ipv4_addresses(data: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     if data.len() < 20 || data[0] >> 4 != 4 {
         return None;
@@ -223,6 +228,7 @@ fn parse_ipv4_addresses(data: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     ))
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn strip_ipv6(data: &[u8], protocol: u8) -> Option<((Ipv6Addr, Ipv6Addr), &[u8])> {
     if data.len() < 40 || data[0] >> 4 != 6 {
         return None;
@@ -233,6 +239,7 @@ fn strip_ipv6(data: &[u8], protocol: u8) -> Option<((Ipv6Addr, Ipv6Addr), &[u8])
     Some(((source, destination), &data[offset..]))
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn ipv6_transport_offset(payload: &[u8], protocol: u8) -> Option<usize> {
     if payload.len() < 40 || payload[0] >> 4 != 6 {
         return None;

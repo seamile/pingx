@@ -569,6 +569,7 @@ mod platform {
             trace_port: u16,
         ) -> io::Result<Self> {
             let v6 = target.is_ipv6();
+            let _ = local;
             let send = match protocol {
                 TraceProtocol::Icmp => Self::icmp_socket(v6)?,
                 TraceProtocol::Udp => {
@@ -2302,14 +2303,17 @@ mod platform {
             let reserve = std::net::UdpSocket::bind(SocketAddr::new(target, 0)).unwrap();
             let base_port = reserve.local_addr().unwrap().port().min(65533);
             drop(reserve);
-            let socket = Arc::new(TraceSocket::new(target, TraceProtocol::Udp, base_port).unwrap());
+            let socket =
+                Arc::new(TraceSocket::new(target, target, TraceProtocol::Udp, base_port).unwrap());
             let (tx, mut rx) = mpsc::channel(8);
-            let receiver = spawn_receiver(socket.clone(), target, tx);
+            let receiver = spawn_receiver(socket.clone(), target, TCP_SEED, tx);
             let result = run_probes(
                 socket.as_ref(),
                 ProbeRequest {
                     target,
+                    local: target,
                     ident: trace_ident(),
+                    tcp_seed: TCP_SEED,
                     protocol: TraceProtocol::Udp,
                     base_port,
                     payload_size: 4,
