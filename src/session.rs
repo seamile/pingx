@@ -142,6 +142,7 @@ impl Session {
         self.run_impl(true).await
     }
 
+    #[cfg(target_os = "macos")]
     pub async fn run_json_only(&self) -> Result<()> {
         self.run_impl(false).await
     }
