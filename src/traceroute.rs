@@ -25,7 +25,7 @@ async fn run_trace(_cli: Cli) -> Result<()> {
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use crate::cli::TraceProtocol;
+    use crate::cli::Protocol as ProbeProtocol;
     use crate::geoip::GeoIpManager;
     use crate::pinger::icmp_packet::IcmpPacket;
     use crate::utils::{IpVersion, resolve_host};
@@ -54,6 +54,13 @@ mod unix {
     const ICMP_DEST_UNREACH_V6: u8 = 1;
     const IDENTIFIER: u16 = 0x5047;
     const TCP_SOURCE_PORT_BASE: u16 = 33434;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TraceProtocol {
+        Icmp,
+        Udp,
+        Tcp,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ReplyKind {
@@ -133,7 +140,15 @@ mod unix {
     }
 
     pub(super) async fn run_trace(cli: Cli) -> Result<()> {
-        let (target_name, protocol, trace_port) = cli.trace_target()?;
+        let spec = cli.trace_target()?;
+        let (protocol, trace_port) = match spec.protocol {
+            ProbeProtocol::Icmp => (TraceProtocol::Icmp, 33434),
+            ProbeProtocol::Tcp(port) => (TraceProtocol::Tcp, port),
+            ProbeProtocol::Udp(port) => (TraceProtocol::Udp, port),
+            ProbeProtocol::Http(_) => {
+                unreachable!("HTTP traceroute is rejected by target parsing")
+            }
+        };
         let version = if cli.ipv4 {
             IpVersion::V4
         } else if cli.ipv6 {
@@ -141,7 +156,7 @@ mod unix {
         } else {
             IpVersion::Any
         };
-        let addrs = resolve_host(target_name, version).await?;
+        let addrs = resolve_host(&spec.host, version).await?;
         let target = select_target(addrs)?;
         let requested = cli
             .targets
@@ -171,7 +186,7 @@ mod unix {
 
         println!(
             "{}",
-            styled_trace_header(target_name, target, max_hops, size)
+            styled_trace_header(&spec.host, target, max_hops, size)
         );
 
         let (reply_tx, mut reply_rx) = mpsc::channel(128);

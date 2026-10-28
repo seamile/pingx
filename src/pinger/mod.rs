@@ -2,6 +2,7 @@ pub mod http;
 pub mod icmp;
 pub mod icmp_packet;
 pub mod tcp;
+pub mod udp;
 
 use crate::cli::Protocol;
 use crate::pinger::icmp::IcmpClient;
@@ -55,6 +56,13 @@ pub fn create_pinger(
             target_name,
             target,
             port,
+            config.timeout,
+        )),
+        Protocol::Udp(port) => Box::new(udp::UdpPinger::new(
+            target_name,
+            target,
+            port,
+            config.size,
             config.timeout,
         )),
         Protocol::Http(url) => {

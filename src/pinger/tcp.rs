@@ -1,5 +1,5 @@
 use crate::pinger::Pinger;
-use crate::session::{PingResult, ProbeStatus};
+use crate::session::{PingResult, ProbeStatus, ResponseType};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
@@ -60,12 +60,18 @@ impl Pinger for TcpPinger {
             let result = tokio::time::timeout(timeout, connect_future).await;
 
             let status = match result {
-                Ok(Ok(_stream)) => ProbeStatus::Success,
-                Ok(Err(e)) => ProbeStatus::Error(e.to_string()),
+                Ok(Ok(_stream)) => ProbeStatus::Success(ResponseType::TcpOpen),
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    ProbeStatus::Success(ResponseType::TcpClosed)
+                }
+                Ok(Err(error)) => ProbeStatus::NetworkError {
+                    node: None,
+                    reason: error.to_string(),
+                },
                 Err(_) => ProbeStatus::Timeout,
             };
 
-            let rtt = if let ProbeStatus::Success = status {
+            let rtt = if matches!(status, ProbeStatus::Success(_)) {
                 start.elapsed()
             } else {
                 std::time::Duration::ZERO

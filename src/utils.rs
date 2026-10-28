@@ -255,9 +255,9 @@ pub fn get_interface_ips(_iface: &str) -> Vec<IpAddr> {
 
 #[cfg(target_os = "linux")]
 pub async fn check_and_acquire_privileges(cli: &crate::cli::Cli) -> Result<()> {
-    use crate::cli::TraceProtocol;
     if cli.traceroute {
-        let needs_raw_socket = cli.trace_target()?.1 != TraceProtocol::Udp;
+        let needs_raw_socket =
+            !matches!(cli.trace_target()?.protocol, crate::cli::Protocol::Udp(_));
         if !needs_raw_socket {
             return Ok(());
         }
@@ -410,86 +410,8 @@ pub fn detect_protocol(
     cli: &crate::cli::Cli,
     target: &str,
 ) -> Result<(crate::cli::Protocol, String)> {
-    // 1. Force Mode
-    if (cli.ipv4 || cli.ipv6) && !cli.tcp {
-        return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-    }
-    if cli.tcp {
-        if let Some((host, port_str)) = target.rsplit_once(':') {
-            let host = if host.starts_with('[') && host.ends_with(']') {
-                &host[1..host.len() - 1]
-            } else {
-                host
-            };
-
-            if let Ok(port) = port_str.parse::<u16>() {
-                return Ok((crate::cli::Protocol::Tcp(port), host.to_string()));
-            }
-        }
-        return Err(anyhow::anyhow!(
-            "TCP mode requires target format <host>:<port>"
-        ));
-    }
-    if cli.http {
-        let url_str = if target.starts_with("http") {
-            target.to_string()
-        } else {
-            format!("http://{}", target)
-        };
-        if let Ok(url) = reqwest::Url::parse(&url_str)
-            && let Some(host) = url.host_str()
-        {
-            return Ok((crate::cli::Protocol::Http(url_str), host.to_string()));
-        }
-        // Fallback if parsing fails?
-        return Ok((
-            crate::cli::Protocol::Http(target.to_string()),
-            target.to_string(),
-        ));
-    }
-
-    // 2. Auto Mode
-    if target.starts_with("http://") || target.starts_with("https://") {
-        if let Ok(url) = reqwest::Url::parse(target)
-            && let Some(host) = url.host_str()
-        {
-            return Ok((
-                crate::cli::Protocol::Http(target.to_string()),
-                host.to_string(),
-            ));
-        }
-        return Ok((
-            crate::cli::Protocol::Http(target.to_string()),
-            target.to_string(),
-        ));
-    }
-
-    // Check for TCP format (host:port)
-    if let Some((host, port_str)) = target.rsplit_once(':')
-        && let Ok(port) = port_str.parse::<u16>()
-    {
-        // Check if it's a valid IPv6 address (which contains colons)
-        if target.parse::<std::net::Ipv6Addr>().is_ok() {
-            // It's a plain IPv6 address, so ICMP
-            return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-        }
-
-        // Also check IPv4 just in case
-        if target.parse::<std::net::Ipv4Addr>().is_ok() {
-            return Ok((crate::cli::Protocol::Icmp, target.to_string()));
-        }
-
-        let clean_host = if host.starts_with('[') && host.ends_with(']') {
-            &host[1..host.len() - 1]
-        } else {
-            host
-        };
-
-        return Ok((crate::cli::Protocol::Tcp(port), clean_host.to_string()));
-    }
-
-    // Default ICMP
-    Ok((crate::cli::Protocol::Icmp, target.to_string()))
+    let spec = cli.target_spec(target)?;
+    Ok((spec.protocol, spec.host))
 }
 
 pub fn parse_headers(raw_headers: &[String]) -> Result<reqwest::header::HeaderMap> {
@@ -668,7 +590,7 @@ mod tests {
             json: None,
             interface: None,
             traceroute: false,
-            trace_protocol: None,
+            udp: false,
             max_hops: 64,
         };
 

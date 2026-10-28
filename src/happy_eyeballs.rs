@@ -23,6 +23,7 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
     }
 
     let sorted_addrs = interleave_addrs(addrs);
+    let fallback = sorted_addrs.first().copied();
     let mut addr_iter = sorted_addrs.into_iter();
     let mut futures = FuturesUnordered::new();
 
@@ -81,7 +82,7 @@ pub async fn select_best_addr(addrs: Vec<IpAddr>, protocol: &Protocol) -> Result
         }
     }
 
-    Err(anyhow::anyhow!("All address probes failed"))
+    fallback.ok_or_else(|| anyhow::anyhow!("No addresses to probe"))
 }
 
 struct AbortOnDropHandle<T>(JoinHandle<T>);
@@ -140,6 +141,7 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
     match protocol {
         Protocol::Icmp => probe_icmp(addr).await,
         Protocol::Tcp(port) => probe_tcp(addr, *port).await,
+        Protocol::Udp(port) => probe_udp(addr, *port).await,
         Protocol::Http(url_str) => {
             let port = if let Ok(url) = reqwest::Url::parse(url_str) {
                 url.port_or_known_default().unwrap_or(80)
@@ -148,6 +150,24 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
             };
             probe_tcp(addr, port).await
         }
+    }
+}
+
+async fn probe_udp(addr: IpAddr, port: u16) -> Result<()> {
+    let socket = tokio::net::UdpSocket::bind(if addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    })
+    .await?;
+    socket.connect(SocketAddr::new(addr, port)).await?;
+    socket.send(&[]).await?;
+    let mut buffer = [0; 512];
+    match tokio::time::timeout(PROBE_TIMEOUT, socket.recv(&mut buffer)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(()),
+        Ok(Err(error)) => Err(error.into()),
+        Err(_) => Err(anyhow::anyhow!("Timeout")),
     }
 }
 
@@ -183,7 +203,7 @@ async fn probe_icmp(addr: IpAddr) -> Result<()> {
 
     match rx.recv().await {
         Some(res) => match res.status {
-            crate::session::ProbeStatus::Success => Ok(()),
+            crate::session::ProbeStatus::Success(_) => Ok(()),
             _ => Err(anyhow::anyhow!("Probe failed: {:?}", res.status)),
         },
         None => Err(anyhow::anyhow!("No result")),

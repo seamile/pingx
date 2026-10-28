@@ -1,5 +1,5 @@
 use crate::pinger::Pinger;
-use crate::session::{PingResult, ProbeStatus};
+use crate::session::{PingResult, ProbeStatus, ResponseType};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url, header::HeaderMap};
@@ -85,16 +85,34 @@ impl Pinger for HttpPinger {
                     let status_code = response.status();
                     let len = response.content_length().unwrap_or(0) as usize;
                     if status_code.is_success() || status_code.is_redirection() {
-                        (ProbeStatus::Success, rtt, len)
+                        (
+                            ProbeStatus::Success(ResponseType::HttpResponse(status_code.as_u16())),
+                            rtt,
+                            len,
+                        )
                     } else {
-                        (ProbeStatus::Error(format!("HTTP {}", status_code)), rtt, 0)
+                        (
+                            ProbeStatus::NetworkError {
+                                node: Some(target_ip),
+                                reason: format!("HTTP {status_code}"),
+                            },
+                            rtt,
+                            0,
+                        )
                     }
                 }
                 Err(e) => {
                     if e.is_timeout() {
                         (ProbeStatus::Timeout, Duration::ZERO, 0)
                     } else {
-                        (ProbeStatus::Error(e.to_string()), Duration::ZERO, 0)
+                        (
+                            ProbeStatus::NetworkError {
+                                node: Some(target_ip),
+                                reason: e.to_string(),
+                            },
+                            Duration::ZERO,
+                            0,
+                        )
                     }
                 }
             };

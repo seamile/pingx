@@ -6,7 +6,7 @@ PingX is a simple and practical network diagnostic tool designed to replace syst
 
 ## Features
 
-1. **Multi-Protocol**: ICMP, TCP, and HTTP probing.
+1. **Multi-Protocol**: ICMP, TCP, UDP, and HTTP probing.
 2. **Dual Stack**: Full support for IPv4, IPv6, and domain resolution.
 3. **Concurrency**: Probe multiple targets simultaneously.
 4. **GeoIP**: Retrieve geographical location (country, region, city, coordinates) for IP addresses.
@@ -69,9 +69,10 @@ pingx 1.1.1.1:80
 
 Use flags to force specific protocols (target must match required format):
 
-- `-4`: Force IPv4 ICMP.
-- `-6`: Force IPv6 ICMP.
-- `-T` / `--tcp`: Force TCP protocol (Target must include port, e.g., `ip:port`).
+- `-4`: Restrict address resolution to IPv4.
+- `-6`: Restrict address resolution to IPv6.
+- `-T` / `--tcp`: Force TCP protocol (default port 80).
+- `-U` / `--udp`: Force UDP protocol (default port 33434).
 - `-H` / `--http`: Force HTTP protocol.
 
 ```shell
@@ -115,15 +116,15 @@ pingx -R example.com
 pingx -R -4 --max-hops 24 example.com
 pingx -R example.com 64
 pingx -R -I en0 example.com
-pingx -R --trace-protocol udp 1.1.1.1
+pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
 pingx -R -T 1.1.1.1:443
-pingx -R --trace-protocol udp 1.1.1.1:33434
+pingx -R -U 1.1.1.1:33434
 ```
 
 Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP 40 bytes (IPv4).
 
-`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP, matching normal ping target syntax. Explicit `--trace-protocol` takes precedence: `--trace-protocol udp HOST:PORT` sets the UDP base port, while explicit ICMP rejects a port. Use `[IPv6]:PORT` for IPv6 ports. TCP (`-R -T` or `--trace-protocol tcp`) defaults to port 80 when omitted; UDP defaults to base port 33434. UDP probes use successive destination ports; TCP probes use successive source ports. TCP traceroute currently supports IPv4 only. There is no separate port option.
+`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP. `-T` forces TCP and defaults to port 80; `-U` forces UDP and defaults to base port 33434. `-4` and `-6` only restrict the resolved address family. Use `[IPv6]:PORT` for IPv6 ports. UDP probes use successive destination ports; TCP probes use successive source ports. TCP traceroute currently supports IPv4 only. There is no separate port option.
 
 Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. RTT is shown as `min/avg/max`; `*` marks an incomplete set of replies. A hop with no replies shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size.
 
@@ -165,8 +166,8 @@ pingx -g 8.8.8.8 --json
 - `-t <TTL>`: Set the IP Time to Live (default 64).
 - `-s <SIZE>`: Size of ICMP payload in bytes (default 56).
 - `--max-hops <N>`: Traceroute hop limit (default 64; `-R` only).
-- `--trace-protocol <udp|icmp|tcp>`: Traceroute probe protocol (default `icmp`; `-R` only).
-- `HOST:PORT`: TCP target port, or UDP base port with `--trace-protocol udp`; use `[IPv6]:PORT` for IPv6.
+- `-U` / `--udp`: Use UDP (default port 33434).
+- `HOST:PORT`: TCP target port, or UDP port when `-U` is set; use `[IPv6]:PORT` for IPv6.
 - `-I <IFACE>`: Specify network interface to bind to (e.g., `en0`, `eth0`, `utun1`).
 - `-q`: Quiet output. Only displays summary statistics.
 
@@ -180,7 +181,7 @@ PingX 是一款简单实用的网络诊断工具，旨在替代系统的 `ping` 
 
 ## 特性
 
-1. **多协议支持**: 支持 ICMP、TCP 和 HTTP 协议探测。
+1. **多协议支持**: 支持 ICMP、TCP、UDP 和 HTTP 协议探测。
 2. **双栈支持**: 完美支持 IPv4、IPv6 地址及域名解析。
 3. **并发探测**: 支持同时对多个目标发起探测。
 4. **GeoIP 信息**: 获取 IP 地址的物理地理位置（国家、地区、城市、经纬度）。
@@ -244,9 +245,10 @@ pingx 1.1.1.1:80
 
 使用参数强制指定协议（此时参数必须符合特定格式）：
 
-- `-4`: 强制使用 ICMP 协议检测 IPv4 目标。
-- `-6`: 强制使用 ICMP 协议检测 IPv6 目标。
-- `-T` / `--tcp`: 强制使用 TCP 协议 (目标必须包含端口，如 `ip:port`)。
+- `-4`: 仅解析 IPv4 地址。
+- `-6`: 仅解析 IPv6 地址。
+- `-T` / `--tcp`: 强制使用 TCP 协议（默认端口 80）。
+- `-U` / `--udp`: 强制使用 UDP 协议（默认端口 33434）。
 - `-H` / `--http`: 强制使用 HTTP 协议。
 
 ```shell
@@ -290,13 +292,13 @@ pingx -R example.com
 pingx -R -4 --max-hops 24 example.com
 pingx -R example.com 64
 pingx -R -I en0 example.com
-pingx -R --trace-protocol udp 1.1.1.1
+pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
 pingx -R -T 1.1.1.1:443
-pingx -R --trace-protocol udp 1.1.1.1:33434
+pingx -R -U 1.1.1.1:33434
 ```
 
-`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP，与普通 ping 的目标格式一致。显式 `--trace-protocol` 优先：`--trace-protocol udp HOST:PORT` 设置 UDP 基础端口，显式 ICMP 则拒绝端口。IPv6 带端口使用 `[IPv6]:PORT`。TCP（`-R -T` 或 `--trace-protocol tcp`）省略端口时默认 80，UDP 省略端口时默认基础端口 33434。UDP 使用递增的目的端口，TCP 使用递增的源端口。TCP 路由追踪目前仅支持 IPv4，不再提供独立端口参数。
+`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP。`-T` 强制 TCP 且省略端口时默认 80，`-U` 强制 UDP 且省略端口时默认基础端口 33434。`-4` 和 `-6` 只限制地址族。IPv6 带端口使用 `[IPv6]:PORT`。UDP 使用递增的目的端口，TCP 使用递增的源端口。TCP 路由追踪目前仅支持 IPv4，不提供独立端口参数。
 
 每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。RTT 显示为 `min/avg/max`；探测未全部返回时追加 `*`。无响应的跳在 IP 和 RTT 列都显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40 字节（IPv4）。
 
@@ -336,9 +338,9 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
-- `-s <SIZE>`: ICMP 数据包大小（默认 56 字节）。
+- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节）。
 - `--max-hops <N>`: 路由追踪最大跳数（默认 64，仅用于 `-R`）。
-- `--trace-protocol <udp|icmp|tcp>`: 路由追踪探测协议（默认 `icmp`，仅用于 `-R`）。
-- `HOST:PORT`：TCP 目标端口，或配合 `--trace-protocol udp` 设置 UDP 基础端口；IPv6 使用 `[IPv6]:PORT`。
+- `-U` / `--udp`: 使用 UDP（默认端口 33434）。
+- `HOST:PORT`：TCP 目标端口，或配合 `-U` 设置 UDP 端口；IPv6 使用 `[IPv6]:PORT`。
 - `-I <IFACE>`: 指定探测流量从哪个网卡接口发送（如 `en0`、`eth0`、`utun1`）。
 - `-q`: 安静模式，不显示逐个包的详细信息，仅显示统计结果。

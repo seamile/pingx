@@ -8,18 +8,46 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::signal;
 
-pub use self::models::{PingResult, ProbeStatus};
+pub use self::models::{PingResult, ProbeStatus, ResponseType};
 
 mod models {
+    use std::collections::BTreeMap;
     use std::net::IpAddr;
     use std::time::Duration;
     use std::time::Instant;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ResponseType {
+        IcmpEchoReply,
+        TcpOpen,
+        TcpClosed,
+        UdpApplicationReply,
+        UdpPortUnreachable,
+        HttpResponse(u16),
+    }
+
+    impl ResponseType {
+        pub fn as_str(self) -> String {
+            match self {
+                Self::IcmpEchoReply => "icmp_echo_reply".to_string(),
+                Self::TcpOpen => "tcp_open".to_string(),
+                Self::TcpClosed => "tcp_closed".to_string(),
+                Self::UdpApplicationReply => "udp_application_reply".to_string(),
+                Self::UdpPortUnreachable => "udp_port_unreachable".to_string(),
+                Self::HttpResponse(code) => format!("http_{code}"),
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub enum ProbeStatus {
-        Success,
+        Success(ResponseType),
         Timeout,
-        Error(String),
+        NetworkError {
+            node: Option<IpAddr>,
+            reason: String,
+        },
+        LocalError(String),
     }
 
     #[derive(Debug, Clone)]
@@ -41,6 +69,9 @@ mod models {
         pub received: u64,
         pub start_time: Instant,
         pub rtts: Vec<Duration>,
+        pub response_counts: BTreeMap<ResponseType, u64>,
+        pub local_failures: u64,
+        pub network_errors: u64,
     }
 
     impl PingStats {
@@ -52,14 +83,23 @@ mod models {
                 received: 0,
                 start_time: Instant::now(),
                 rtts: Vec::new(),
+                response_counts: BTreeMap::new(),
+                local_failures: 0,
+                network_errors: 0,
             }
         }
 
         pub fn update(&mut self, result: &PingResult) {
             self.transmitted += 1;
-            if let ProbeStatus::Success = result.status {
-                self.received += 1;
-                self.rtts.push(result.rtt);
+            match &result.status {
+                ProbeStatus::Success(kind) => {
+                    self.received += 1;
+                    self.rtts.push(result.rtt);
+                    *self.response_counts.entry(*kind).or_default() += 1;
+                }
+                ProbeStatus::LocalError(_) => self.local_failures += 1,
+                ProbeStatus::NetworkError { .. } => self.network_errors += 1,
+                ProbeStatus::Timeout => {}
             }
         }
     }
@@ -71,6 +111,7 @@ use std::sync::Arc;
 pub struct JsonResult {
     pub target: String,
     pub protocol: String,
+    pub target_port: Option<u16>,
     pub ip: String,
     pub packet_size: usize,
     pub ttl: u32,
@@ -83,6 +124,9 @@ pub struct JsonResult {
     pub max: f64,
     pub mdev: f64,
     pub jitter: f64,
+    pub response_counts: std::collections::BTreeMap<String, u64>,
+    pub local_failures: u64,
+    pub network_errors: u64,
 }
 
 pub struct Session {
@@ -182,13 +226,7 @@ impl Session {
                         models::PingStats::new(target_string.clone(), target_addr),
                     );
 
-                    println!(
-                        "PING {} ({}) {}({}) bytes of data.",
-                        target_string,
-                        target_addr,
-                        self.cli.size,
-                        self.cli.size + 28
-                    );
+                    Self::print_header(target_string, target_addr, &protocol, self.cli.size);
 
                     let config = crate::pinger::PingerConfig {
                         ttl: self.cli.ttl,
@@ -314,12 +352,7 @@ impl Session {
                     let protocol = target_protocols
                         .get(target_host)
                         .unwrap_or(&crate::cli::Protocol::Icmp);
-                    let protocol_str = match protocol {
-                        crate::cli::Protocol::Icmp => "ICMP",
-                        crate::cli::Protocol::Tcp(_) => "TCP",
-                        crate::cli::Protocol::Http(_) => "HTTP",
-                    }
-                    .to_string();
+                    let protocol_str = protocol.name().to_string();
 
                     // Calculate stats
                     let loss = if stats.transmitted > 0 {
@@ -367,6 +400,7 @@ impl Session {
                     json_results.push(JsonResult {
                         target: target_host.clone(),
                         protocol: protocol_str,
+                        target_port: protocol.port(),
                         ip: stats._address.to_string(),
                         packet_size: self.cli.size,
                         ttl: self.cli.ttl,
@@ -379,6 +413,13 @@ impl Session {
                         max,
                         mdev,
                         jitter,
+                        response_counts: stats
+                            .response_counts
+                            .iter()
+                            .map(|(kind, count)| (kind.as_str(), *count))
+                            .collect(),
+                        local_failures: stats.local_failures,
+                        network_errors: stats.network_errors,
                     });
                 }
             }
@@ -432,22 +473,18 @@ impl Session {
     }
 
     fn print_result(result: &models::PingResult, protocol: &crate::cli::Protocol) {
-        let seq_prefix = match protocol {
-            crate::cli::Protocol::Icmp => "icmp_seq",
-            crate::cli::Protocol::Tcp(_) => "tcp_seq",
-            crate::cli::Protocol::Http(_) => "http_seq",
-        };
+        let seq_prefix = protocol.sequence_name();
 
         match &result.status {
-            models::ProbeStatus::Success => {
+            models::ProbeStatus::Success(kind) => {
                 let ttl_str = if let Some(ttl) = result.ttl {
                     format!(" ttl={}", ttl)
                 } else {
                     "".to_string()
                 };
 
-                match protocol {
-                    crate::cli::Protocol::Icmp => {
+                match kind {
+                    models::ResponseType::IcmpEchoReply => {
                         println!(
                             "{} bytes from {}: {}={}{} time={:.3} ms",
                             result.bytes,
@@ -458,12 +495,47 @@ impl Session {
                             result.rtt.as_secs_f64() * 1000.0
                         );
                     }
-                    _ => {
+                    models::ResponseType::TcpOpen | models::ResponseType::TcpClosed => {
+                        let state = if matches!(kind, models::ResponseType::TcpOpen) {
+                            "open"
+                        } else {
+                            "closed"
+                        };
                         println!(
-                            "from {}: {}={} time={:.3} ms",
+                            "from {}: {}={} state={}{} time={:.3} ms",
                             result.target_addr,
                             seq_prefix,
                             result.seq,
+                            state,
+                            ttl_str,
+                            result.rtt.as_secs_f64() * 1000.0
+                        );
+                    }
+                    models::ResponseType::UdpApplicationReply
+                    | models::ResponseType::UdpPortUnreachable => {
+                        let state = if matches!(kind, models::ResponseType::UdpApplicationReply) {
+                            "application reply"
+                        } else {
+                            "port unreachable"
+                        };
+                        println!(
+                            "from {}: {}={} {}{} time={:.3} ms",
+                            result.target_addr,
+                            seq_prefix,
+                            result.seq,
+                            state,
+                            ttl_str,
+                            result.rtt.as_secs_f64() * 1000.0
+                        );
+                    }
+                    models::ResponseType::HttpResponse(code) => {
+                        println!(
+                            "from {}: {}={} status={}{} time={:.3} ms",
+                            result.target_addr,
+                            seq_prefix,
+                            result.seq,
+                            code,
+                            ttl_str,
                             result.rtt.as_secs_f64() * 1000.0
                         );
                     }
@@ -472,8 +544,38 @@ impl Session {
             models::ProbeStatus::Timeout => {
                 println!("Request timeout for {}={}", seq_prefix, result.seq);
             }
-            models::ProbeStatus::Error(e) => {
-                eprintln!("Error for {}={}: {}", seq_prefix, result.seq, e);
+            models::ProbeStatus::NetworkError { node, reason } => {
+                let node = node.map(|node| format!(" from {node}")).unwrap_or_default();
+                eprintln!(
+                    "Network error{node} for {}={}: {}",
+                    seq_prefix, result.seq, reason
+                );
+            }
+            models::ProbeStatus::LocalError(error) => {
+                eprintln!("Local error for {}={}: {}", seq_prefix, result.seq, error);
+            }
+        }
+    }
+
+    fn print_header(
+        target: &str,
+        address: std::net::IpAddr,
+        protocol: &crate::cli::Protocol,
+        size: usize,
+    ) {
+        match protocol {
+            crate::cli::Protocol::Icmp => println!(
+                "PING {target} ({address}) {size}({}) bytes of data.",
+                size + 28
+            ),
+            crate::cli::Protocol::Tcp(port) => {
+                println!("TCP PING {target} ({address}) port {port}: 0 bytes of data.")
+            }
+            crate::cli::Protocol::Udp(port) => {
+                println!("UDP PING {target} ({address}) port {port}: {size} bytes of data.")
+            }
+            crate::cli::Protocol::Http(_) => {
+                println!("HTTP PING {target} ({address}) HEAD request.")
             }
         }
     }
@@ -655,7 +757,7 @@ mod tests {
             bytes: 56,
             ttl: Some(64),
             rtt: Duration::from_millis(10),
-            status: models::ProbeStatus::Success,
+            status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
         stats.update(&models::PingResult {
             target: "test".to_string(),
@@ -664,7 +766,7 @@ mod tests {
             bytes: 56,
             ttl: Some(64),
             rtt: Duration::from_millis(20),
-            status: models::ProbeStatus::Success,
+            status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
         stats.update(&models::PingResult {
             target: "test".to_string(),
@@ -673,7 +775,7 @@ mod tests {
             bytes: 56,
             ttl: Some(64),
             rtt: Duration::from_millis(30),
-            status: models::ProbeStatus::Success,
+            status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
 
         let table = Session::prepare_table_data(&stats);
@@ -726,5 +828,54 @@ mod tests {
         assert_eq!(get_val("avg:"), "-");
         assert_eq!(get_val("mdev:"), "-");
         assert_eq!(get_val("jitter:"), "-");
+    }
+
+    #[test]
+    fn response_kinds_and_failures_are_counted_separately() {
+        let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let result = |seq, status| models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            seq,
+            bytes: 0,
+            ttl: None,
+            rtt: if matches!(&status, models::ProbeStatus::Success(_)) {
+                Duration::from_millis(seq)
+            } else {
+                Duration::ZERO
+            },
+            status,
+        };
+
+        stats.update(&result(
+            1,
+            models::ProbeStatus::Success(models::ResponseType::TcpClosed),
+        ));
+        stats.update(&result(
+            2,
+            models::ProbeStatus::Success(models::ResponseType::UdpPortUnreachable),
+        ));
+        stats.update(&result(3, models::ProbeStatus::Timeout));
+        stats.update(&result(
+            4,
+            models::ProbeStatus::LocalError("send failed".to_string()),
+        ));
+        stats.update(&result(
+            5,
+            models::ProbeStatus::NetworkError {
+                node: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                reason: "unreachable".to_string(),
+            },
+        ));
+
+        assert_eq!(stats.transmitted, 5);
+        assert_eq!(stats.received, 2);
+        assert_eq!(stats.response_counts[&models::ResponseType::TcpClosed], 1);
+        assert_eq!(
+            stats.response_counts[&models::ResponseType::UdpPortUnreachable],
+            1
+        );
+        assert_eq!(stats.local_failures, 1);
+        assert_eq!(stats.network_errors, 1);
     }
 }

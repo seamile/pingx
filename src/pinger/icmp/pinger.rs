@@ -1,7 +1,7 @@
 use crate::pinger::Pinger;
 use crate::pinger::icmp::client::IcmpClient;
 use crate::pinger::icmp_packet::IcmpPacket;
-use crate::session::{PingResult, ProbeStatus};
+use crate::session::{PingResult, ProbeStatus, ResponseType};
 use anyhow::Result;
 use async_trait::async_trait;
 use socket2::Type;
@@ -84,7 +84,7 @@ impl Pinger for IcmpPinger {
                 bytes: 0,
                 ttl: None,
                 rtt: Duration::ZERO,
-                status: ProbeStatus::Error(e.to_string()),
+                status: ProbeStatus::LocalError(e.to_string()),
             })
             .await;
             return Ok(());
@@ -112,7 +112,7 @@ impl Pinger for IcmpPinger {
                                 bytes: size,
                                 ttl: reply.ttl,
                                 rtt,
-                                status: ProbeStatus::Success,
+                                status: ProbeStatus::Success(ResponseType::IcmpEchoReply),
                             })
                             .await;
                     }
@@ -128,7 +128,7 @@ impl Pinger for IcmpPinger {
                                 bytes: 0,
                                 ttl: None,
                                 rtt: Duration::ZERO,
-                                status: ProbeStatus::Error("Receiver closed".into()),
+                                status: ProbeStatus::LocalError("receiver closed".into()),
                             })
                             .await;
                     }

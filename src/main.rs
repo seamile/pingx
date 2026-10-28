@@ -3,6 +3,7 @@ mod config;
 mod geoip;
 mod happy_eyeballs;
 mod pinger;
+mod probe;
 mod session;
 mod traceroute;
 mod utils;
