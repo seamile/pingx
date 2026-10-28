@@ -64,6 +64,7 @@ pub fn create_pinger(
             target,
             port,
             config.size,
+            config.ttl,
             config.timeout,
         )),
         Protocol::Http(url) => {

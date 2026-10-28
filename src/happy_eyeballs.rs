@@ -160,6 +160,21 @@ async fn probe_address(addr: IpAddr, protocol: &Protocol) -> Result<()> {
 }
 
 async fn probe_udp(addr: IpAddr, port: u16) -> Result<()> {
+    #[cfg(unix)]
+    {
+        crate::probe::udp::probe(addr, port, 0, PROBE_TIMEOUT, 64)
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+    #[cfg(not(unix))]
+    {
+        probe_udp_socket(addr, port).await
+    }
+}
+
+#[cfg(not(unix))]
+async fn probe_udp_socket(addr: IpAddr, port: u16) -> Result<()> {
     let socket = tokio::net::UdpSocket::bind(if addr.is_ipv6() {
         "[::]:0"
     } else {

@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv6Addr};
 
 #[cfg(unix)]
 pub(crate) mod tcp_syn;
+#[cfg(unix)]
+pub(crate) mod udp;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Protocol {

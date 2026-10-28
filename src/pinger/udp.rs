@@ -2,10 +2,11 @@ use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(unix))]
+use std::{io, net::SocketAddr, time::Instant};
 use tokio::sync::{Mutex, mpsc};
 
 pub struct UdpPinger {
@@ -13,6 +14,7 @@ pub struct UdpPinger {
     target: IpAddr,
     port: u16,
     size: usize,
+    ttl: u32,
     timeout: Duration,
     result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
@@ -23,6 +25,7 @@ impl UdpPinger {
         target: IpAddr,
         port: u16,
         size: usize,
+        ttl: u32,
         timeout: Duration,
     ) -> Self {
         Self {
@@ -30,6 +33,7 @@ impl UdpPinger {
             target,
             port,
             size,
+            ttl,
             timeout,
             result_tx: Arc::new(Mutex::new(None)),
         }
@@ -51,64 +55,11 @@ impl Pinger for UdpPinger {
         let target = self.target;
         let port = self.port;
         let size = self.size;
+        let ttl = self.ttl;
         let timeout = self.timeout;
 
         tokio::spawn(async move {
-            let start = Instant::now();
-            let socket = match udp_socket(target, port).await {
-                Ok(socket) => socket,
-                Err(error) => {
-                    send_result(
-                        &result_tx,
-                        target_name,
-                        target,
-                        seq,
-                        0,
-                        Duration::ZERO,
-                        ProbeStatus::LocalError(error.to_string()),
-                    )
-                    .await;
-                    return;
-                }
-            };
-
-            if let Err(error) = socket.send(&vec![0; size]).await {
-                send_result(
-                    &result_tx,
-                    target_name,
-                    target,
-                    seq,
-                    0,
-                    Duration::ZERO,
-                    ProbeStatus::LocalError(error.to_string()),
-                )
-                .await;
-                return;
-            }
-
-            let mut buffer = vec![0; 65_535];
-            let (status, rtt, bytes) =
-                match tokio::time::timeout(timeout, socket.recv(&mut buffer)).await {
-                    Ok(Ok(bytes)) => (
-                        ProbeStatus::Success(ResponseType::UdpApplicationReply),
-                        start.elapsed(),
-                        bytes,
-                    ),
-                    Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => (
-                        ProbeStatus::Success(ResponseType::UdpPortUnreachable),
-                        start.elapsed(),
-                        0,
-                    ),
-                    Ok(Err(error)) => (
-                        ProbeStatus::NetworkError {
-                            node: None,
-                            reason: error.to_string(),
-                        },
-                        Duration::ZERO,
-                        0,
-                    ),
-                    Err(_) => (ProbeStatus::Timeout, Duration::ZERO, 0),
-                };
+            let (status, rtt, bytes) = probe(target, port, size, timeout, ttl).await;
             send_result(&result_tx, target_name, target, seq, bytes, rtt, status).await;
         });
         Ok(())
@@ -119,37 +70,93 @@ impl Pinger for UdpPinger {
     }
 }
 
-async fn udp_socket(target: IpAddr, port: u16) -> io::Result<tokio::net::UdpSocket> {
-    #[cfg(unix)]
-    let socket = if let Some(interface) = crate::utils::get_bind_interface() {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let domain = if target.is_ipv6() {
-            Domain::IPV6
-        } else {
-            Domain::IPV4
-        };
-        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-        crate::utils::bind_socket_to_interface(&socket, interface, target.is_ipv6())?;
-        socket.set_nonblocking(true)?;
-        let socket: std::net::UdpSocket = socket.into();
-        tokio::net::UdpSocket::from_std(socket)?
-    } else {
-        tokio::net::UdpSocket::bind(if target.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })
-        .await?
-    };
+#[cfg(unix)]
+async fn probe(
+    target: IpAddr,
+    port: u16,
+    size: usize,
+    timeout: Duration,
+    ttl: u32,
+) -> (ProbeStatus, Duration, usize) {
+    use crate::probe::udp::{self, UdpProbeFailure, UdpProbeKind};
 
-    #[cfg(not(unix))]
+    match udp::probe(target, port, size, timeout, ttl).await {
+        Ok(reply) => (
+            ProbeStatus::Success(match reply.kind {
+                UdpProbeKind::ApplicationReply => ResponseType::UdpApplicationReply,
+                UdpProbeKind::PortUnreachable => ResponseType::UdpPortUnreachable,
+            }),
+            reply.rtt,
+            reply.bytes,
+        ),
+        Err(UdpProbeFailure::Timeout) => (ProbeStatus::Timeout, Duration::ZERO, 0),
+        Err(UdpProbeFailure::Network { node, reason }) => (
+            ProbeStatus::NetworkError { node, reason },
+            Duration::ZERO,
+            0,
+        ),
+        Err(UdpProbeFailure::Local(error)) => (ProbeStatus::LocalError(error), Duration::ZERO, 0),
+    }
+}
+
+#[cfg(not(unix))]
+async fn probe(
+    target: IpAddr,
+    port: u16,
+    size: usize,
+    timeout: Duration,
+    _ttl: u32,
+) -> (ProbeStatus, Duration, usize) {
+    let start = Instant::now();
+    let socket = match udp_socket(target, port).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            return (
+                ProbeStatus::LocalError(error.to_string()),
+                Duration::ZERO,
+                0,
+            );
+        }
+    };
+    if let Err(error) = socket.send(&vec![0; size]).await {
+        return (
+            ProbeStatus::LocalError(error.to_string()),
+            Duration::ZERO,
+            0,
+        );
+    }
+    let mut buffer = vec![0; 65_535];
+    match tokio::time::timeout(timeout, socket.recv(&mut buffer)).await {
+        Ok(Ok(bytes)) => (
+            ProbeStatus::Success(ResponseType::UdpApplicationReply),
+            start.elapsed(),
+            bytes,
+        ),
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => (
+            ProbeStatus::Success(ResponseType::UdpPortUnreachable),
+            start.elapsed(),
+            0,
+        ),
+        Ok(Err(error)) => (
+            ProbeStatus::NetworkError {
+                node: None,
+                reason: error.to_string(),
+            },
+            Duration::ZERO,
+            0,
+        ),
+        Err(_) => (ProbeStatus::Timeout, Duration::ZERO, 0),
+    }
+}
+
+#[cfg(not(unix))]
+async fn udp_socket(target: IpAddr, port: u16) -> io::Result<tokio::net::UdpSocket> {
     let socket = tokio::net::UdpSocket::bind(if target.is_ipv6() {
         "[::]:0"
     } else {
         "0.0.0.0:0"
     })
     .await?;
-
     socket.connect(SocketAddr::new(target, port)).await?;
     Ok(socket)
 }
@@ -176,7 +183,7 @@ async fn send_result(
         .await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", not(unix))))]
 mod tests {
     use super::*;
 
@@ -196,6 +203,7 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             port,
             4,
+            64,
             Duration::from_secs(1),
         );
         pinger.start(tx).await.unwrap();
