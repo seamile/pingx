@@ -108,6 +108,13 @@ mod macos {
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
+    const ROOT_COPY_SCRIPT: &str = r#"set -eu
+work=$(/usr/bin/mktemp -d /private/tmp/pingx-helper.XXXXXX)
+trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
+/bin/cat > "$work/pingx"
+/bin/chmod 700 "$work/pingx"
+"$work/pingx" "$@"
+"#;
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct HelperState {
@@ -662,12 +669,15 @@ mod macos {
     }
 
     fn run_sudo(args: &[&str]) -> Result<()> {
-        let current_exe = std::env::current_exe().context("resolve current executable")?;
-        let status = Command::new("sudo")
+        let source = open_current_executable()?;
+        let status = Command::new("/usr/bin/sudo")
             .arg("--")
-            .arg(current_exe)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(ROOT_COPY_SCRIPT)
+            .arg("pingx-helper")
             .args(args)
-            .stdin(Stdio::inherit())
+            .stdin(Stdio::from(source))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -734,12 +744,7 @@ mod macos {
             "the root account cannot be the helper caller"
         );
 
-        let source = std::env::current_exe().context("resolve helper source")?;
-        let source_metadata = fs::metadata(&source).context("inspect helper source")?;
-        anyhow::ensure!(
-            source_metadata.is_file(),
-            "helper source is not a regular file"
-        );
+        let mut input = open_current_executable()?;
 
         let helper = Path::new(HELPER_PATH);
         let helper_dir = helper.parent().unwrap();
@@ -753,7 +758,6 @@ mod macos {
             allowed_uid,
         })?;
         let mut staged = Vec::new();
-        let mut input = File::open(&source).context("open helper source")?;
         stage_install(&mut staged, helper, 0o755, |output| {
             io::copy(&mut input, output).map(|_| ())
         })?;
@@ -1197,6 +1201,24 @@ mod macos {
         validate_install_directory(path, &metadata, 0)
     }
 
+    fn open_current_executable() -> Result<File> {
+        let path = std::env::current_exe().context("resolve current executable")?;
+        open_executable(&path)
+    }
+
+    fn open_executable(path: &Path) -> Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "current executable is not a regular file"
+        );
+        Ok(file)
+    }
+
     fn validate_install_directory(path: &Path, metadata: &fs::Metadata, owner: u32) -> Result<()> {
         anyhow::ensure!(
             metadata.is_dir()
@@ -1470,6 +1492,46 @@ mod macos {
             };
             let data = serde_json::to_vec(&state).unwrap();
             assert_eq!(serde_json::from_slice::<HelperState>(&data).unwrap(), state);
+        }
+
+        #[test]
+        fn root_copy_runs_the_opened_executable_after_its_path_changes() {
+            let root = std::env::temp_dir().join(format!(
+                "pingx-helper-open-executable-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let path = root.join("pingx");
+            fs::write(&path, "#!/bin/sh\nprintf 'opened-file\\n'").unwrap();
+            let input = open_executable(&path).unwrap();
+            let replacement = root.join("replacement");
+            fs::write(&replacement, "#!/bin/sh\nprintf 'replaced-file\\n'").unwrap();
+            fs::rename(replacement, &path).unwrap();
+            let output = Command::new("/bin/sh")
+                .args(["-c", ROOT_COPY_SCRIPT, "pingx-helper"])
+                .stdin(Stdio::from(input))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"opened-file\n");
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn helper_source_must_not_be_a_symlink() {
+            let root = std::env::temp_dir().join(format!(
+                "pingx-helper-source-symlink-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir(&root).unwrap();
+            let file = root.join("pingx");
+            let link = root.join("link");
+            fs::write(&file, "binary").unwrap();
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(open_executable(&link).is_err());
+            let _ = fs::remove_dir_all(&root);
         }
 
         #[test]
