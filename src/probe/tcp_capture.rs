@@ -188,7 +188,10 @@ impl BpfCapture {
                 )
             } != 0
             {
-                return Err(io::Error::last_os_error());
+                return Err(ioctl_error(
+                    "read BPF data-link type",
+                    io::Error::last_os_error(),
+                ));
             }
             if !matches!(data_link_type, DLT_NULL | DLT_EN10MB | DLT_RAW | DLT_LOOP) {
                 return Err(io::Error::new(
@@ -196,12 +199,17 @@ impl BpfCapture {
                     format!("unsupported BPF data-link type {data_link_type} on {interface}"),
                 ));
             }
-            let filter = tcp_filter(data_link_type)?;
+            let filter = tcp_filter(data_link_type)
+                .map_err(|error| ioctl_error("build BPF TCP filter", error))?;
             if unsafe { libc::ioctl(fd.as_raw_fd(), libc::BIOCSETF, &filter) } != 0 {
-                return Err(io::Error::last_os_error());
+                return Err(ioctl_error(
+                    "install BPF TCP filter",
+                    io::Error::last_os_error(),
+                ));
             }
             return Ok(Self {
-                fd: unsafe { AsyncFd::register(fd) }?,
+                fd: unsafe { AsyncFd::register(fd) }
+                    .map_err(|error| ioctl_error("register BPF device", error.into()))?,
                 data_link_type,
                 buffer_size,
             });
