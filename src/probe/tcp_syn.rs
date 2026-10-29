@@ -505,8 +505,14 @@ fn build_tcp_packet_v4(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TCP packet is too large"))?;
     let mut packet = vec![0u8; total];
     packet[0] = 0x45;
+    #[cfg(target_os = "macos")]
+    packet[2..4].copy_from_slice(&(total as u16).to_ne_bytes());
+    #[cfg(not(target_os = "macos"))]
     packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-    packet[6] = 0x40;
+    #[cfg(target_os = "macos")]
+    packet[6..8].copy_from_slice(&0x4000u16.to_ne_bytes());
+    #[cfg(not(target_os = "macos"))]
+    packet[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
     packet[8] = ttl;
     packet[9] = 6;
     packet[12..16].copy_from_slice(&source.octets());
@@ -855,7 +861,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(packet.len(), 40);
+        #[cfg(target_os = "macos")]
+        assert_eq!(&packet[2..4], &40u16.to_ne_bytes());
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(&packet[2..4], &40u16.to_be_bytes());
+        #[cfg(target_os = "macos")]
+        assert_eq!(&packet[6..8], &0x4000u16.to_ne_bytes());
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(&packet[6..8], &0x4000u16.to_be_bytes());
         assert_eq!(packet[9], 6);
         assert_eq!(&packet[20..22], &40000u16.to_be_bytes());
