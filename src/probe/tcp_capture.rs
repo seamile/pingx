@@ -252,6 +252,10 @@ fn configure(fd: RawFd, interface: &str) -> io::Result<usize> {
     if unsafe { libc::ioctl(fd, libc::BIOCIMMEDIATE, &immediate) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    let see_sent: libc::c_uint = 1;
+    if unsafe { libc::ioctl(fd, libc::BIOCSSEESENT, &see_sent) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     let timeout = libc::timeval {
         tv_sec: 0,
         tv_usec: 10_000,
@@ -447,5 +451,10 @@ mod tests {
         ipv6[4 + 40] = 6;
         ipv6[4 + 8..4 + 24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
         assert!(parse_frame(&ipv6, DLT_NULL).is_some());
+    }
+
+    #[test]
+    fn bpf_requests_sent_packets() {
+        assert_eq!(libc::BIOCSSEESENT, 0x80044277);
     }
 }
