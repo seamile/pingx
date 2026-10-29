@@ -5,6 +5,7 @@ use std::mem::{self, MaybeUninit};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Mutex, OnceLock};
+use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::broadcast;
 
@@ -208,7 +209,7 @@ impl BpfCapture {
                 ));
             }
             return Ok(Self {
-                fd: unsafe { AsyncFd::register(fd) }
+                fd: unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }
                     .map_err(|error| ioctl_error("register BPF device", error.into()))?,
                 data_link_type,
                 buffer_size,
