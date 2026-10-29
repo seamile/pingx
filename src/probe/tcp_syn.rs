@@ -322,15 +322,20 @@ impl TcpSynSockets {
         let v6 = target.is_ipv6();
         #[cfg(not(target_os = "macos"))]
         let _ = local;
-        let send = raw_socket(v6, Protocol::TCP)?;
-        bind_device(&send, v6)?;
+        let send = raw_socket(v6, Protocol::TCP)
+            .map_err(|error| socket_stage("open TCP send socket", error))?;
+        bind_device(&send, v6).map_err(|error| socket_stage("bind TCP send socket", error))?;
         if v6 {
-            send.set_unicast_hops_v6(u32::from(ttl))?;
+            send.set_unicast_hops_v6(u32::from(ttl))
+                .map_err(|error| socket_stage("set IPv6 hop limit", error))?;
             #[cfg(not(target_os = "macos"))]
-            send.set_header_included_v6(true)?;
+            send.set_header_included_v6(true)
+                .map_err(|error| socket_stage("set IPv6 header inclusion", error))?;
         } else {
-            send.set_header_included_v4(true)?;
-            send.set_ttl_v4(u32::from(ttl))?;
+            send.set_header_included_v4(true)
+                .map_err(|error| socket_stage("set IPv4 header inclusion", error))?;
+            send.set_ttl_v4(u32::from(ttl))
+                .map_err(|error| socket_stage("set IPv4 TTL", error))?;
         }
         #[cfg(not(target_os = "macos"))]
         let tcp = {
@@ -346,24 +351,32 @@ impl TcpSynSockets {
             unsafe { AsyncFd::register(tcp) }?
         };
         #[cfg(target_os = "macos")]
-        let tcp = AsyncMutex::new(crate::probe::tcp_capture::TcpCapture::new(local)?);
+        let tcp = AsyncMutex::new(
+            crate::probe::tcp_capture::TcpCapture::new(local)
+                .map_err(|error| socket_stage("open macOS TCP capture", error))?,
+        );
         let icmp_protocol = if v6 {
             Protocol::ICMPV6
         } else {
             Protocol::ICMPV4
         };
-        let icmp = raw_socket(v6, icmp_protocol)?;
-        bind_device(&icmp, v6)?;
+        let icmp = raw_socket(v6, icmp_protocol)
+            .map_err(|error| socket_stage("open ICMP receive socket", error))?;
+        bind_device(&icmp, v6).map_err(|error| socket_stage("bind ICMP receive socket", error))?;
 
-        send.set_nonblocking(true)?;
-        icmp.set_nonblocking(true)?;
+        send.set_nonblocking(true)
+            .map_err(|error| socket_stage("make TCP send socket nonblocking", error))?;
+        icmp.set_nonblocking(true)
+            .map_err(|error| socket_stage("make ICMP socket nonblocking", error))?;
         // Tokio can drive nonblocking raw Unix sockets through AsyncFd.
         let send: std::net::UdpSocket = send.into();
         let icmp: std::net::UdpSocket = icmp.into();
         Ok(Self {
-            send: unsafe { AsyncFd::register(send) }?,
+            send: unsafe { AsyncFd::register(send) }
+                .map_err(|error| socket_stage("register TCP send socket", error.into()))?,
             tcp,
-            icmp: unsafe { AsyncFd::register(icmp) }?,
+            icmp: unsafe { AsyncFd::register(icmp) }
+                .map_err(|error| socket_stage("register ICMP socket", error.into()))?,
         })
     }
 
@@ -454,6 +467,10 @@ fn bind_device(socket: &Socket, v6: bool) -> io::Result<()> {
         crate::utils::bind_socket_to_interface(socket, interface, v6)?;
     }
     Ok(())
+}
+
+fn socket_stage(stage: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
 
 pub(crate) fn build_tcp_packet(
