@@ -469,6 +469,7 @@ fn bind_device(socket: &Socket, v6: bool) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn socket_stage(stage: &str, error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
@@ -836,6 +837,7 @@ fn to_local_failure(error: impl ToString) -> TcpSynFailure {
     TcpSynFailure::Local(error.to_string())
 }
 
+#[cfg(unix)]
 fn local_failure(stage: &str, error: impl ToString) -> TcpSynFailure {
     TcpSynFailure::Local(format!("{stage}: {}", error.to_string()))
 }
