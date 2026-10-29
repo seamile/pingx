@@ -495,16 +495,8 @@ fn build_tcp_packet_v4(
     let tcp_checksum = finish_checksum(sum);
     packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
 
-    #[cfg(target_os = "macos")]
-    {
-        packet[2..4].copy_from_slice(&(total as u16).to_ne_bytes());
-        packet[6..8].copy_from_slice(&0x4000u16.to_ne_bytes());
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let header_checksum = finish_checksum(words(&packet[..20]));
-        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
-    }
+    let header_checksum = finish_checksum(words(&packet[..20]));
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
     Ok(packet)
 }
 
@@ -836,10 +828,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(packet.len(), 40);
+        assert_eq!(&packet[2..4], &40u16.to_be_bytes());
+        assert_eq!(&packet[6..8], &0x4000u16.to_be_bytes());
         assert_eq!(packet[9], 6);
         assert_eq!(&packet[20..22], &40000u16.to_be_bytes());
         assert_eq!(&packet[22..24], &443u16.to_be_bytes());
         assert_eq!(packet[33], TCP_SYN);
+        assert_eq!(finish_checksum(words(&packet[..20])), 0);
         assert_eq!(
             finish_checksum(
                 pseudo_header(&[192, 0, 2, 1], &[198, 51, 100, 2], packet[20..].len())

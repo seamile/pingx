@@ -1362,7 +1362,7 @@ mod platform {
         )
     }
 
-    #[cfg(all(test, not(target_os = "macos")))]
+    #[cfg(test)]
     fn ip_checksum(header: &[u8]) -> u16 {
         finish_checksum(header.chunks(2).fold(0u32, |sum, word| {
             sum + u16::from_be_bytes([word[0], *word.get(1).unwrap_or(&0)]) as u32
@@ -3401,10 +3401,7 @@ mod platform {
                 ),
                 0
             );
-            #[cfg(not(target_os = "macos"))]
             assert_eq!(ip_checksum(&packet[..20]), 0);
-            #[cfg(target_os = "macos")]
-            assert_eq!(&packet[10..12], &[0, 0]);
         }
 
         #[test]
