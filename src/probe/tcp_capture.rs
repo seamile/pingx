@@ -230,7 +230,10 @@ impl BpfCapture {
 fn configure(fd: RawFd, interface: &str) -> io::Result<usize> {
     let mut buffer_size = BPF_BUFFER_SIZE as u32;
     if unsafe { libc::ioctl(fd, libc::BIOCSBLEN, &mut buffer_size) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error(
+            "set BPF buffer size",
+            io::Error::last_os_error(),
+        ));
     }
 
     let mut request = IfReq::zeroed();
@@ -245,29 +248,45 @@ fn configure(fd: RawFd, interface: &str) -> io::Result<usize> {
         *target = *source as libc::c_char;
     }
     if unsafe { libc::ioctl(fd, libc::BIOCSETIF, &request) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error("set BPF interface", io::Error::last_os_error()));
     }
 
     let immediate: libc::c_uint = 1;
     if unsafe { libc::ioctl(fd, libc::BIOCIMMEDIATE, &immediate) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error(
+            "enable immediate BPF mode",
+            io::Error::last_os_error(),
+        ));
     }
     let see_sent: libc::c_uint = 1;
     if unsafe { libc::ioctl(fd, libc::BIOCSSEESENT, &see_sent) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error(
+            "enable sent BPF packets",
+            io::Error::last_os_error(),
+        ));
     }
     let timeout = libc::timeval {
         tv_sec: 0,
         tv_usec: 10_000,
     };
     if unsafe { libc::ioctl(fd, libc::BIOCSRTIMEOUT, &timeout) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error(
+            "set BPF read timeout",
+            io::Error::last_os_error(),
+        ));
     }
     let mut buffer_size = 0u32;
     if unsafe { libc::ioctl(fd, libc::BIOCGBLEN, &mut buffer_size) } != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ioctl_error(
+            "read BPF buffer size",
+            io::Error::last_os_error(),
+        ));
     }
     Ok(buffer_size as usize)
+}
+
+fn ioctl_error(stage: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
 
 fn tcp_filter(data_link_type: u32) -> io::Result<BpfProgram> {
