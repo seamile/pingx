@@ -75,16 +75,19 @@ pub async fn probe(
 ) -> Result<TcpSynReply, TcpSynFailure> {
     let ttl = u8::try_from(ttl)
         .map_err(|_| TcpSynFailure::Local("TTL must be between 0 and 255".to_string()))?;
-    let local = local_address_for(target).map_err(to_local_failure)?;
-    let reservation = reserve_source_port(local).map_err(to_local_failure)?;
+    let local =
+        local_address_for(target).map_err(|error| local_failure("select local address", error))?;
+    let reservation =
+        reserve_source_port(local).map_err(|error| local_failure("reserve source port", error))?;
     let source_port = reservation
         .local_addr()
-        .map_err(to_local_failure)?
+        .map_err(|error| local_failure("read reserved source port", error))?
         .as_socket()
         .ok_or_else(|| TcpSynFailure::Local("local source port unavailable".to_string()))?
         .port();
     let sequence = next_sequence();
-    let sockets = TcpSynSockets::new(local, target, ttl).map_err(to_local_failure)?;
+    let sockets = TcpSynSockets::new(local, target, ttl)
+        .map_err(|error| local_failure("create TCP sockets", error))?;
     let packet = build_tcp_packet(
         local,
         target,
@@ -98,11 +101,11 @@ pub async fn probe(
         },
         ttl,
     )
-    .map_err(to_local_failure)?;
+    .map_err(|error| local_failure("build SYN packet", error))?;
     sockets
         .send(&packet, target)
         .await
-        .map_err(to_local_failure)?;
+        .map_err(|error| local_failure("send SYN packet", error))?;
     let started = Instant::now();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -112,7 +115,8 @@ pub async fn probe(
     loop {
         tokio::select! {
             received = sockets.recv_tcp(&mut tcp_buffer) => {
-                let (size, from) = received.map_err(to_local_failure)?;
+                let (size, from) = received
+                    .map_err(|error| local_failure("receive TCP reply", error))?;
                 let Some(reply) = parse_tcp_reply(
                     &tcp_buffer[..size],
                     from,
@@ -135,7 +139,7 @@ pub async fn probe(
                             payload: &[],
                         },
                         64,
-                    ).map_err(to_local_failure)?;
+                    ).map_err(|error| local_failure("build TCP reset", error))?;
                     let _ = sockets.send(&reset, target).await;
                 }
                 return Ok(TcpSynReply {
@@ -144,7 +148,8 @@ pub async fn probe(
                 });
             }
             received = sockets.recv_icmp(&mut icmp_buffer) => {
-                let (size, from) = received.map_err(to_local_failure)?;
+                let (size, from) = received
+                    .map_err(|error| local_failure("receive ICMP error", error))?;
                 if let Some(failure) = parse_icmp_error(
                     &icmp_buffer[..size],
                     from,
@@ -803,8 +808,13 @@ fn domain(v6: bool) -> Domain {
     if v6 { Domain::IPV6 } else { Domain::IPV4 }
 }
 
+#[cfg(windows)]
 fn to_local_failure(error: impl ToString) -> TcpSynFailure {
     TcpSynFailure::Local(error.to_string())
+}
+
+fn local_failure(stage: &str, error: impl ToString) -> TcpSynFailure {
+    TcpSynFailure::Local(format!("{stage}: {}", error.to_string()))
 }
 
 #[cfg(test)]
