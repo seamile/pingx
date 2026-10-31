@@ -16,6 +16,8 @@ Ping Options:
   -i <INTERVAL>             Probe interval, in seconds [default: 1.0]
   -w <DEADLINE>             Stop after DEADLINE seconds
   -t <TTL>                  IP Time to Live [default: 64]
+  -D                        Prefix each probe result with its local print time
+      --ts-fmt <FORMAT>     Timestamp format for -D: unix or iso [default: unix]
   -q                        Show only startup information and final statistics
   -H, --http                Use HTTP probes
       --header <HEADER>     Add an HTTP header; may be repeated
@@ -62,6 +64,8 @@ Notes:
   TCP, and -R -U HOST:PORT uses UDP.
 
   -T, -U, and -H are mutually exclusive; -4 and -6 are mutually exclusive.
+  unix prints [seconds.microseconds]; iso prints local YYYY-MM-DD HH:MM:SS.mmm.
+  --ts-fmt requires -D. Timestamps apply to per-probe and Ping JSON results.
   --json writes to stdout; --json=FILE writes to FILE.
   Traceroute does not support HTTP or GeoIP mode.
   In traceroute mode, -c, -i, -w, -t, -q, and --header are ignored.

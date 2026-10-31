@@ -5,7 +5,7 @@ use anyhow::Result;
 use colored::*;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal;
 
 pub use self::models::{PingResult, ProbeStatus, ResponseType};
@@ -133,6 +133,15 @@ pub struct JsonResult {
     pub response_counts: std::collections::BTreeMap<String, u64>,
     pub local_failures: u64,
     pub network_errors: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<JsonTimestamp>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum JsonTimestamp {
+    Unix(f64),
+    Iso(String),
 }
 
 pub struct Session {
@@ -354,7 +363,7 @@ impl Session {
                     if settled && inflight_packets > 0 { inflight_packets -= 1; }
                     if !quiet && !json_stdout {
                         let protocol = target_protocols.get(&result.target).unwrap_or(&crate::cli::Protocol::Icmp);
-                        Self::print_result(&result, protocol);
+                        Self::print_result(&result, protocol, &self.cli)?;
                     }
 
                     if waiting_for_shutdown && inflight_packets == 0 {
@@ -449,6 +458,11 @@ impl Session {
                             .collect(),
                         local_failures: stats.local_failures,
                         network_errors: stats.network_errors,
+                        timestamp: self
+                            .cli
+                            .timestamp
+                            .then(|| json_timestamp(self.cli.timestamp_format.unwrap_or_default()))
+                            .transpose()?,
                     });
                 }
             }
@@ -496,8 +510,17 @@ impl Session {
         Ok(())
     }
 
-    fn print_result(result: &models::PingResult, protocol: &crate::cli::Protocol) {
+    fn print_result(
+        result: &models::PingResult,
+        protocol: &crate::cli::Protocol,
+        cli: &Cli,
+    ) -> Result<()> {
         let seq_prefix = protocol.sequence_name();
+        let timestamp = cli
+            .timestamp
+            .then(|| timestamp_prefix(cli.timestamp_format.unwrap_or_default()))
+            .transpose()?
+            .unwrap_or_default();
 
         match &result.status {
             models::ProbeStatus::Success(kind) => {
@@ -510,7 +533,8 @@ impl Session {
                 match kind {
                     models::ResponseType::IcmpEchoReply => {
                         println!(
-                            "{} bytes from {}: {}={} status=reply{} time={:.3} ms",
+                            "{}{} bytes from {}: {}={} status=reply{} time={:.3} ms",
+                            timestamp,
                             result.bytes,
                             result.target_addr,
                             seq_prefix,
@@ -526,7 +550,8 @@ impl Session {
                             "closed"
                         };
                         println!(
-                            "from {}: {}={} status={}{} time={:.3} ms",
+                            "{}from {}: {}={} status={}{} time={:.3} ms",
+                            timestamp,
                             result.target_addr,
                             seq_prefix,
                             result.seq,
@@ -543,7 +568,8 @@ impl Session {
                             "port_unreachable"
                         };
                         println!(
-                            "from {}: {}={} status={}{} time={:.3} ms",
+                            "{}from {}: {}={} status={}{} time={:.3} ms",
+                            timestamp,
                             result.target_addr,
                             seq_prefix,
                             result.seq,
@@ -554,7 +580,8 @@ impl Session {
                     }
                     models::ResponseType::HttpResponse(code) => {
                         println!(
-                            "from {}: {}={} status={}{} time={:.3} ms",
+                            "{}from {}: {}={} status={}{} time={:.3} ms",
+                            timestamp,
                             result.target_addr,
                             seq_prefix,
                             result.seq,
@@ -567,24 +594,25 @@ impl Session {
             }
             models::ProbeStatus::Timeout => {
                 println!(
-                    "from {}: {}={} status=timeout",
-                    result.target_addr, seq_prefix, result.seq
+                    "{}from {}: {}={} status=timeout",
+                    timestamp, result.target_addr, seq_prefix, result.seq
                 );
             }
             models::ProbeStatus::NetworkError { node, reason } => {
                 let node = node.map(|node| format!(" from {node}")).unwrap_or_default();
                 eprintln!(
-                    "Network error{node}: {}={} status=network_error reason={}",
-                    seq_prefix, result.seq, reason
+                    "{}Network error{node}: {}={} status=network_error reason={}",
+                    timestamp, seq_prefix, result.seq, reason
                 );
             }
             models::ProbeStatus::LocalError(error) => {
                 eprintln!(
-                    "Local error: {}={} status=local_error error={}",
-                    seq_prefix, result.seq, error
+                    "{}Local error: {}={} status=local_error error={}",
+                    timestamp, seq_prefix, result.seq, error
                 );
             }
         }
+        Ok(())
     }
 
     fn print_header(
@@ -780,6 +808,44 @@ struct TableData {
     rows: [[Cell; 3]; 3],
 }
 
+fn timestamp_prefix_at(format: crate::cli::TimestampFormat, now: SystemTime) -> Result<String> {
+    use crate::cli::TimestampFormat;
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| anyhow::anyhow!("system clock is before Unix epoch: {error}"))?;
+    match format {
+        TimestampFormat::Unix => Ok(format!("[{}.{:06}] ", now.as_secs(), now.subsec_micros())),
+        TimestampFormat::Iso => {
+            let local = time::OffsetDateTime::from_unix_timestamp_nanos(now.as_nanos() as i128)?
+                .to_offset(time::UtcOffset::current_local_offset()?);
+            let value = local.format(time::macros::format_description!(
+                "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
+            ))?;
+            Ok(format!("{value} "))
+        }
+    }
+}
+
+fn timestamp_prefix(format: crate::cli::TimestampFormat) -> Result<String> {
+    timestamp_prefix_at(format, SystemTime::now())
+}
+
+fn json_timestamp(format: crate::cli::TimestampFormat) -> Result<JsonTimestamp> {
+    use crate::cli::TimestampFormat;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| anyhow::anyhow!("system clock is before Unix epoch: {error}"))?;
+    match format {
+        TimestampFormat::Unix => Ok(JsonTimestamp::Unix(now.as_secs_f64())),
+        TimestampFormat::Iso => Ok(JsonTimestamp::Iso(
+            timestamp_prefix_at(format, UNIX_EPOCH + now)?
+                .trim()
+                .to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +859,62 @@ mod tests {
             std::process::id()
         ));
         assert!(write_json_file(path.to_str().unwrap(), b"{}").is_err());
+    }
+
+    #[test]
+    fn timestamp_prefix_formats_unix_microseconds_and_local_iso_milliseconds() {
+        let now = UNIX_EPOCH + Duration::from_micros(1_793_427_601_123_456);
+        assert_eq!(
+            timestamp_prefix_at(crate::cli::TimestampFormat::Unix, now).unwrap(),
+            "[1793427601.123456] "
+        );
+
+        let prefix = timestamp_prefix_at(crate::cli::TimestampFormat::Iso, now).unwrap();
+        assert!(prefix.ends_with(' '));
+        assert_eq!(&prefix[4..5], "-");
+        assert_eq!(&prefix[7..8], "-");
+        assert_eq!(&prefix[10..11], " ");
+        assert_eq!(&prefix[13..14], ":");
+        assert_eq!(&prefix[16..17], ":");
+        assert_eq!(&prefix[19..20], ".");
+        assert_eq!(prefix.trim_end().len(), 23);
+    }
+
+    #[test]
+    fn json_timestamp_keeps_numeric_and_string_shapes() {
+        assert!(matches!(
+            json_timestamp(crate::cli::TimestampFormat::Unix).unwrap(),
+            JsonTimestamp::Unix(_)
+        ));
+        assert!(matches!(
+            json_timestamp(crate::cli::TimestampFormat::Iso).unwrap(),
+            JsonTimestamp::Iso(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(JsonResult {
+                target: "test".into(),
+                protocol: "icmp".into(),
+                target_port: None,
+                ip: "127.0.0.1".into(),
+                packet_size: 56,
+                ttl: 64,
+                sent: 0,
+                received: 0,
+                loss: 0.0,
+                time: 0.0,
+                min: 0.0,
+                avg: 0.0,
+                max: 0.0,
+                mdev: 0.0,
+                jitter: 0.0,
+                response_counts: Default::default(),
+                local_failures: 0,
+                network_errors: 0,
+                timestamp: Some(JsonTimestamp::Unix(1_793_427_601.123_456)),
+            })
+            .unwrap()["timestamp"],
+            1_793_427_601.123_456
+        );
     }
 
     #[test]

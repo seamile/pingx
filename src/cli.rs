@@ -6,6 +6,23 @@ pub use crate::probe::{Protocol, ProtocolMode, TargetSpec};
 pub const DEFAULT_PING_SIZE: usize = 56;
 pub const DEFAULT_TRACEROUTE_MAX_HOPS: u8 = 32;
 
+#[derive(
+    clap::ValueEnum,
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+)]
+pub enum TimestampFormat {
+    #[default]
+    Unix,
+    Iso,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
@@ -62,6 +79,19 @@ pub struct Cli {
     /// Quiet output. Nothing is displayed except the summary lines at startup time and when finished.
     #[arg(short = 'q', help_heading = "Ping Options")]
     pub quiet: bool,
+
+    /// Prefix each probe result with its local print time.
+    #[arg(short = 'D', help_heading = "Ping Options")]
+    pub timestamp: bool,
+
+    /// Timestamp format used with -D [default: unix].
+    #[arg(
+        long = "ts-fmt",
+        value_enum,
+        requires = "timestamp",
+        help_heading = "Ping Options"
+    )]
+    pub timestamp_format: Option<TimestampFormat>,
 
     /// Use this network interface for DNS, probes, HTTP, and GeoIP (Unix only).
     #[arg(
@@ -321,6 +351,17 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_format_defaults_to_unix_and_requires_timestamp_output() {
+        let cli = parse(&["-D", "example.com"]).unwrap();
+        assert!(cli.timestamp);
+        assert_eq!(cli.timestamp_format, None);
+
+        let cli = parse(&["-D", "--ts-fmt", "iso", "example.com"]).unwrap();
+        assert_eq!(cli.timestamp_format, Some(TimestampFormat::Iso));
+        assert!(parse(&["--ts-fmt", "unix", "example.com"]).is_err());
+    }
+
+    #[test]
     fn traceroute_ignores_ping_options() {
         let cli = parse(&[
             "-R",
@@ -401,8 +442,8 @@ mod tests {
             (
                 ping,
                 vec![
-                    "-c", "-i", "-w", "-t", "-q", "-H", "--header", "-T", "-U", "-4", "-6", "-I",
-                    "-s", "-W", "--json",
+                    "-c", "-i", "-w", "-t", "-D", "--ts-fmt", "-q", "-H", "--header", "-T", "-U",
+                    "-4", "-6", "-I", "-s", "-W", "--json",
                 ],
             ),
             (

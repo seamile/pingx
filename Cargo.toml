@@ -36,6 +36,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
 unicode-width = "0.2.2"
+time = { version = "0.3.55", features = ["formatting", "local-offset", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

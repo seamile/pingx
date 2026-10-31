@@ -226,7 +226,11 @@ Traceroute JSON contains `target_name`, the resolved IP in `target`, `max_hops`,
 - `HOST:PORT`: TCP target port, or UDP port when `-U` is set; use `[IPv6]:PORT` for IPv6.
 - `-I <IFACE>`: Bind DNS, probes, HTTP, and GeoIP downloads to a Unix network interface (e.g., `en0`, `eth0`, `utun1`); unavailable on Windows.
 - `-q`: Suppress per-probe output but keep the startup header and final statistics.
+- `-D`: Prefix each Ping probe result with its local print time, like Linux `ping -D`.
+- `--ts-fmt <FORMAT>`: Timestamp format used with `-D`: `unix` (default) or `iso`.
 - `--json`: Write JSON to stdout. `--json=FILE` writes it to `FILE` instead.
+
+`-D` prints `[seconds.microseconds]` by default. `-D --ts-fmt iso` prints local `YYYY-MM-DD HH:MM:SS.mmm`. The timestamp is captured when the result line or JSON summary record is prepared for output. Ping JSON records include a numeric `timestamp` with `unix` or a local string with `iso`; the field is absent without `-D`. RTT and interval timing are unchanged.
 
 ---
 
@@ -457,4 +461,8 @@ pingx -R example.com --json=route.json
 - `HOST:PORT`：TCP 目标端口，或配合 `-U` 设置 UDP 端口；IPv6 使用 `[IPv6]:PORT`。
 - `-I <IFACE>`: 将 DNS、探测、HTTP 和 GeoIP 下载绑定到指定 Unix 网卡接口（如 `en0`、`eth0`、`utun1`）；Windows 不可用。
 - `-q`: 安静模式，不显示逐个包的结果，但仍显示启动标题和最终统计。
+- `-D`: 在每条 Ping 探测结果前显示本地输出时间，行为对应 Linux `ping -D`。
+- `--ts-fmt <FORMAT>`: 配合 `-D` 使用的时间格式，可选 `unix`（默认）或 `iso`。
 - `--json`: 将 JSON 写到标准输出；`--json=FILE` 改为写入 `FILE`。
+
+`-D` 默认输出 `[秒.微秒]`；`-D --ts-fmt iso` 输出本地 `YYYY-MM-DD HH:MM:SS.mmm`。时间在准备输出结果行或 JSON 汇总记录时取得。Ping JSON 记录在 `unix` 下包含数值型 `timestamp`，在 `iso` 下包含本地时间字符串；未指定 `-D` 时没有该字段。RTT 和发包间隔不受影响。

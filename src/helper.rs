@@ -104,7 +104,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 5;
+    const PROTOCOL_VERSION: u16 = 6;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -172,6 +172,9 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         ttl: u32,
         size: usize,
         quiet: bool,
+        timestamp: bool,
+        #[serde(default)]
+        timestamp_format: Option<crate::cli::TimestampFormat>,
         interface: Option<String>,
         ipv4: bool,
         ipv6: bool,
@@ -271,6 +274,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             ttl: cli.ttl,
             size: cli.ping_size(),
             quiet: cli.quiet,
+            timestamp: cli.timestamp,
+            timestamp_format: cli.timestamp_format,
             interface: cli.interface.clone(),
             ipv4: cli.ipv4,
             ipv6: cli.ipv6,
@@ -403,6 +408,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: self.ttl,
                 size: Some(self.size),
                 quiet: self.quiet,
+                timestamp: self.timestamp,
+                timestamp_format: self.timestamp_format,
                 interface: self.interface.clone(),
                 ipv4: self.ipv4,
                 ipv6: self.ipv6,
@@ -431,6 +438,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: self.size,
                 quiet: false,
+                timestamp: false,
+                timestamp_format: None,
                 interface: self.interface.clone(),
                 ipv4: self.ipv4,
                 ipv6: self.ipv6,
@@ -1492,6 +1501,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: 56,
                 quiet: false,
+                timestamp: false,
+                timestamp_format: None,
                 interface: None,
                 ipv4: false,
                 ipv6: false,
@@ -1528,6 +1539,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: Some(56),
                 quiet: false,
+                timestamp: false,
+                timestamp_format: None,
                 interface: None,
                 ipv4: false,
                 ipv6: false,
@@ -1987,6 +2000,29 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
 
             let cli = cli_with_targets(&["127.0.0.1:1", "https://example.com"]);
             assert!(operation_from_cli(&cli).is_err());
+        }
+
+        #[test]
+        fn helper_request_preserves_timestamp_options() {
+            let mut cli = cli_with_targets(&["127.0.0.1:1"]);
+            cli.tcp = true;
+            cli.timestamp = true;
+            cli.timestamp_format = Some(crate::cli::TimestampFormat::Iso);
+
+            let Operation::Ping(ping) = operation_from_cli(&cli).unwrap().unwrap() else {
+                panic!("expected ping operation")
+            };
+            assert!(ping.timestamp);
+            assert_eq!(
+                ping.timestamp_format,
+                Some(crate::cli::TimestampFormat::Iso)
+            );
+            let parsed = ping.to_cli();
+            assert!(parsed.timestamp);
+            assert_eq!(
+                parsed.timestamp_format,
+                Some(crate::cli::TimestampFormat::Iso)
+            );
         }
 
         #[tokio::test]
