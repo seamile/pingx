@@ -3434,15 +3434,20 @@ mod platform {
             let table = render_table(&cells);
             let lines: Vec<_> = table.lines().collect();
             assert_eq!(
-                UnicodeWidthStr::width(lines[0]),
-                UnicodeWidthStr::width(lines[2])
+                UnicodeWidthStr::width(strip_style(lines[0]).as_str()),
+                UnicodeWidthStr::width(strip_style(lines[2]).as_str())
             );
         }
 
         #[test]
         fn header_uses_the_documented_layout() {
             assert_eq!(
-                styled_trace_header("demo.example", IpAddr::V4(Ipv4Addr::LOCALHOST), 64, 40),
+                strip_style(&styled_trace_header(
+                    "demo.example",
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    64,
+                    40,
+                )),
                 "Target: demo.example (127.0.0.1)   Max Hops:  64    Size: 40 b"
             );
         }
@@ -3482,14 +3487,7 @@ mod platform {
             )];
             let table = render_table(&cells);
             let lines: Vec<_> = table.lines().collect();
-            let header = colored::control::SHOULD_COLORIZE.should_colorize();
-            let plain_header = if header {
-                lines[0].replace("\x1b[1m", "").replace("\x1b[0m", "")
-            } else {
-                lines[0].to_string()
-            };
-            assert_eq!(plain_header, lines[0]);
-            assert!(header || lines[0] == plain_header);
+            assert_eq!(strip_style(lines[0]), "Hop | IP      | Location |      RTT");
         }
 
         #[test]
@@ -3504,10 +3502,14 @@ mod platform {
             let table = render_table(&[cells]);
             let lines: Vec<_> = table.lines().collect();
             assert_eq!(
-                UnicodeWidthStr::width(lines[0]),
-                UnicodeWidthStr::width(lines[2])
+                UnicodeWidthStr::width(strip_style(lines[0]).as_str()),
+                UnicodeWidthStr::width(strip_style(lines[2]).as_str())
             );
-            assert!(UnicodeWidthStr::width(lines[2]) < 160);
+            assert!(UnicodeWidthStr::width(strip_style(lines[2]).as_str()) < 160);
+        }
+
+        fn strip_style(value: &str) -> String {
+            value.replace("\x1b[1m", "").replace("\x1b[0m", "")
         }
 
         #[test]
