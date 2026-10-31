@@ -3206,8 +3206,7 @@ mod platform {
                 "pingx",
                 "-R",
                 "example.com",
-                "--json",
-                path.to_str().unwrap(),
+                &format!("--json={}", path.to_str().unwrap()),
             ])
             .unwrap();
             let data = TraceData::from_rows(

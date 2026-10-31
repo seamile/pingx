@@ -4,7 +4,8 @@ Usage: pingx [OPTIONS] [TARGETS]...
 
 Arguments:
   [TARGETS]...  IP addresses, domain names, HOST:PORT endpoints, or HTTP URLs.
-                Traceroute requires exactly one target. Use [IPv6]:PORT for IPv6 ports.
+                Use [IPv6]:PORT for IPv6 ports.
+                Traceroute requires exactly one target.
 
 Options:
   -h, --help                Print help
@@ -22,28 +23,28 @@ Ping Options:
   -U, --udp                 Use UDP probes [default port: 33434]
   -4                        Force IPv4
   -6                        Force IPv6
-  -I, --interface <IFACE>    Bind DNS and probes to an interface (Unix only)
+  -I, --interface <IFACE>   Bind DNS and probes to an interface (Unix only)
   -s <SIZE>                 ICMP/UDP payload size, in bytes [default: 56]
   -W <TIMEOUT>              Response timeout, in seconds [default: 1.0]
-      --json [<FILE>]       Output JSON to stdout or FILE
+      --json[=<FILE>]       Output JSON to stdout, or to FILE with --json=FILE
 
 Traceroute Options:
   -R, --traceroute          Trace the route to one target
-      --max-hops <MAX_HOPS>  Maximum number of hops [default: 32]
+      --max-hops <MAX_HOPS> Maximum number of hops [default: 32]
   -T, --tcp                 Use TCP SYN probes [default port: 80]
   -U, --udp                 Use UDP probes [default base port: 33434]
   -4                        Force IPv4
   -6                        Force IPv6
-  -I, --interface <IFACE>    Bind DNS and probes to an interface (Unix only)
+  -I, --interface <IFACE>   Bind DNS and probes to an interface (Unix only)
   -s <SIZE>                 Total IP packet size, in bytes [default: IPv4 40, IPv6 60]
   -W <TIMEOUT>              Response timeout, in seconds [default: 1.0]
-      --json [<FILE>]       Output a successful trace as JSON to stdout or FILE
+      --json[=<FILE>]       Output a successful trace to stdout, or to FILE with --json=FILE
 
 Geo Options:
   -g, --geo                 Look up target locations and exit
       --fetch-geo           Download or update the GeoIP databases and exit
-  -I, --interface <IFACE>    Use an interface for DNS and downloads (Unix only)
-      --json [<FILE>]       Output lookup results as JSON to stdout or FILE
+  -I, --interface <IFACE>   Use an interface for DNS and downloads (Unix only)
+      --json[=<FILE>]       Output lookup results to stdout, or to FILE with --json=FILE
 
 Helper Commands (macOS):
   pingx helper install      Install or update the privileged helper
@@ -61,8 +62,9 @@ Notes:
   TCP, and -R -U HOST:PORT uses UDP.
 
   -T, -U, and -H are mutually exclusive; -4 and -6 are mutually exclusive.
+  --json writes to stdout; --json=FILE writes to FILE.
   Traceroute does not support HTTP or GeoIP mode.
-  Ping-only options are ignored in traceroute mode.
+  In traceroute mode, -c, -i, -w, -t, -q, and --header are ignored.
   Traceroute JSON is emitted only after the target is reached.
 
   TCP probes are half-open: SYN-ACK indicates open; RST indicates closed.

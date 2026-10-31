@@ -135,8 +135,14 @@ pub struct Cli {
     #[arg(long = "fetch-geo", group = "mode", help_heading = "Geo Options")]
     pub fetch_geo: bool,
 
-    /// Output results in JSON format. Optional value specifies output file.
-    #[arg(long = "json", num_args = 0..=1, value_name = "FILE", help_heading = "Common Options")]
+    /// Output results as JSON to stdout, or to FILE with --json=FILE.
+    #[arg(
+        long = "json",
+        num_args = 0..=1,
+        value_name = "FILE",
+        require_equals = true,
+        help_heading = "Common Options"
+    )]
     pub json: Option<Option<String>>,
 
     /// Trace the route to a single IPv4, IPv6, or domain target.
@@ -299,8 +305,19 @@ mod tests {
         let cli = parse(&["-R", "example.com", "--json"]).unwrap();
         assert_eq!(cli.json, Some(None));
 
-        let cli = parse(&["-R", "example.com", "--json", "route.json"]).unwrap();
+        let cli = parse(&["-R", "example.com", "--json=route.json"]).unwrap();
         assert_eq!(cli.json, Some(Some("route.json".to_string())));
+    }
+
+    #[test]
+    fn json_without_file_does_not_consume_targets() {
+        let cli = parse(&["--json", "192.0.2.1", "192.0.2.2"]).unwrap();
+        assert_eq!(cli.json, Some(None));
+        assert_eq!(cli.targets, ["192.0.2.1", "192.0.2.2"]);
+
+        let cli = parse(&["--json=result.json", "192.0.2.1"]).unwrap();
+        assert_eq!(cli.json, Some(Some("result.json".to_string())));
+        assert_eq!(cli.targets, ["192.0.2.1"]);
     }
 
     #[test]
