@@ -383,7 +383,10 @@ mod tests {
 
     #[test]
     fn help_lists_mode_groups_and_helper_commands() {
-        let help = Cli::command().render_help().to_string();
+        let help = Cli::command()
+            .render_help()
+            .to_string()
+            .replace("\r\n", "\n");
         assert!(help.contains("Ping Options"));
         assert!(help.contains("Traceroute Options"));
         assert!(help.contains("Geo Options"));
