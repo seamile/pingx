@@ -430,9 +430,15 @@ mod tests {
         for flag in ["-h", "--help"] {
             let error = parse(&[flag]).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
-            assert_eq!(error.to_string(), help);
+            assert_eq!(error.to_string().replace("\r\n", "\n"), help);
         }
-        assert_eq!(Cli::command().render_long_help().to_string(), help);
+        assert_eq!(
+            Cli::command()
+                .render_long_help()
+                .to_string()
+                .replace("\r\n", "\n"),
+            help
+        );
     }
 
     #[test]
