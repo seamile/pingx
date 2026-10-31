@@ -37,6 +37,7 @@ Traceroute Options:
   -I, --interface <IFACE>    Bind DNS and probes to an interface (Unix only)
   -s <SIZE>                 Total IP packet size, in bytes [default: IPv4 40, IPv6 60]
   -W <TIMEOUT>              Response timeout, in seconds [default: 1.0]
+      --json [<FILE>]       Output a successful trace as JSON to stdout or FILE
 
 Geo Options:
   -g, --geo                 Look up target locations and exit
@@ -53,9 +54,16 @@ Notes:
   Without -T, -U, or -H, the target format selects the protocol:
   HOST uses ICMP, HOST:PORT uses TCP, and an HTTP URL uses HTTP.
 
+  For HOST and HOST:PORT targets, -T or -U overrides auto-detection:
+  HOST:PORT uses TCP with -T and UDP with -U. Omitted ports default to
+  80 or 33434, respectively.
+  Traceroute follows the same rules: -R HOST is ICMP, -R HOST:PORT is
+  TCP, and -R -U HOST:PORT uses UDP.
+
   -T, -U, and -H are mutually exclusive; -4 and -6 are mutually exclusive.
-  Traceroute does not support HTTP, GeoIP mode, or JSON output.
+  Traceroute does not support HTTP or GeoIP mode.
   Ping-only options are ignored in traceroute mode.
+  Traceroute JSON is emitted only after the target is reached.
 
   TCP probes are half-open: SYN-ACK indicates open; RST indicates closed.
   Closed TCP ports and UDP port-unreachable replies count as received responses.

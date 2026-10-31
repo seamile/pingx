@@ -104,7 +104,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 4;
+    const PROTOCOL_VERSION: u16 = 5;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -192,6 +192,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         tcp: bool,
         udp: bool,
         max_hops: u8,
+        json: bool,
+        json_file: bool,
     }
 
     #[derive(Debug, Deserialize, Serialize)]
@@ -237,6 +239,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 tcp: cli.tcp,
                 udp: cli.udp,
                 max_hops: cli.max_hops,
+                json: cli.json.is_some(),
+                json_file: cli.json.as_ref().is_some_and(Option::is_some),
             })));
         }
 
@@ -359,6 +363,10 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                         .is_none_or(|size| (1..=u16::MAX as usize).contains(&size)),
                     "invalid packet size"
                 );
+                anyhow::ensure!(
+                    !trace.json_file || trace.json,
+                    "JSON file output requires JSON mode"
+                );
                 validate_interface(trace.interface.as_deref())?;
                 let cli = trace.to_cli();
                 anyhow::ensure!(
@@ -432,7 +440,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 headers: Vec::new(),
                 geo: false,
                 fetch_geo: false,
-                json: None,
+                // The root worker must never write to a caller-selected path.
+                json: self.json.then_some(None),
                 traceroute: true,
                 max_hops: self.max_hops,
             }
@@ -523,13 +532,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
 
     async fn run_client(operation: Operation, json_path: Option<PathBuf>) -> Result<i32> {
         validate_operation(&operation)?;
-        let json_file_requested = matches!(
-            &operation,
-            Operation::Ping(PingOperation {
-                json_file: true,
-                ..
-            })
-        );
+        let json_file_requested = operation_requests_json_file(&operation);
         anyhow::ensure!(
             !json_file_requested || json_path.is_some(),
             "helper JSON file path is missing"
@@ -1008,7 +1011,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         writer: &mut tokio::net::unix::OwnedWriteHalf,
         mut child: tokio::process::Child,
     ) -> Result<Option<i32>> {
-        let traceroute = matches!(&operation, Operation::Trace(_));
+        let trace_data_response = uses_trace_data_response(&operation);
         let mut input = child
             .stdin
             .take()
@@ -1064,7 +1067,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                                 writer,
                                 &Response {
                                     protocol_version: PROTOCOL_VERSION,
-                                    result: if stream == OutputStream::Stdout && traceroute {
+                                    result: if stream == OutputStream::Stdout && trace_data_response {
                                         ResponseResult::TraceData { data }
                                     } else {
                                         ResponseResult::Output { stream, data }
@@ -1087,6 +1090,20 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         let _ = stdout_task.await;
         let _ = stderr_task.await;
         Ok(Some(status.and_then(|status| status.code()).unwrap_or(1)))
+    }
+
+    fn operation_requests_json_file(operation: &Operation) -> bool {
+        match operation {
+            Operation::Ping(ping) => ping.json_file,
+            Operation::Trace(trace) => trace.json_file,
+        }
+    }
+
+    fn uses_trace_data_response(operation: &Operation) -> bool {
+        matches!(
+            operation,
+            Operation::Trace(TraceOperation { json: false, .. })
+        )
     }
 
     async fn forward_output<R>(
@@ -1485,6 +1502,22 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             }
         }
 
+        fn trace_operation(json: bool, json_file: bool) -> TraceOperation {
+            TraceOperation {
+                target: "example.com".to_string(),
+                size: None,
+                timeout_ns: 1_000_000_000,
+                interface: None,
+                ipv4: false,
+                ipv6: false,
+                tcp: false,
+                udp: false,
+                max_hops: crate::cli::DEFAULT_TRACEROUTE_MAX_HOPS,
+                json,
+                json_file,
+            }
+        }
+
         fn cli_with_targets(targets: &[&str]) -> Cli {
             Cli {
                 targets: targets.iter().map(|target| (*target).to_string()).collect(),
@@ -1798,6 +1831,26 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         fn worker_json_output_cannot_choose_a_file_path() {
             let cli = ping_operation().to_cli();
             assert_eq!(cli.json, Some(None));
+        }
+
+        #[test]
+        fn trace_json_reaches_the_worker_without_a_file_path() {
+            let operation = Operation::Trace(trace_operation(true, true));
+            let cli = match &operation {
+                Operation::Trace(trace) => trace.to_cli(),
+                Operation::Ping(_) => unreachable!(),
+            };
+            assert!(cli.traceroute);
+            assert_eq!(cli.json, Some(None));
+            assert!(operation_requests_json_file(&operation));
+            assert!(!uses_trace_data_response(&operation));
+        }
+
+        #[test]
+        fn human_traceroute_output_uses_the_helper_data_channel() {
+            let operation = Operation::Trace(trace_operation(false, false));
+            assert!(!operation_requests_json_file(&operation));
+            assert!(uses_trace_data_response(&operation));
         }
 
         fn sleeping_worker() -> tokio::process::Child {

@@ -1,16 +1,15 @@
 use crate::cli::Cli;
 use anyhow::Result;
-#[cfg(target_os = "macos")]
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceOutput {
     Human,
+    Json,
     #[cfg(target_os = "macos")]
     HelperData,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TraceData {
     target_name: String,
@@ -20,14 +19,12 @@ struct TraceData {
     rows: Vec<TraceDataRow>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TraceDataRow {
     ttl: u8,
     nodes: Vec<TraceDataNode>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TraceDataNode {
     ip: std::net::IpAddr,
@@ -45,12 +42,22 @@ impl TraceSession {
     }
 
     pub async fn run(&self) -> Result<()> {
-        run_trace(self.cli.clone(), TraceOutput::Human).await
+        let output = if self.cli.json.is_some() {
+            TraceOutput::Json
+        } else {
+            TraceOutput::Human
+        };
+        run_trace(self.cli.clone(), output).await
     }
 
     #[cfg(target_os = "macos")]
     pub async fn run_helper_data(&self) -> Result<()> {
-        run_trace(self.cli.clone(), TraceOutput::HelperData).await
+        let output = if self.cli.json.is_some() {
+            TraceOutput::Json
+        } else {
+            TraceOutput::HelperData
+        };
+        run_trace(self.cli.clone(), output).await
     }
 }
 
@@ -163,7 +170,6 @@ mod platform {
         error: Option<u8>,
     }
 
-    #[cfg(target_os = "macos")]
     impl TraceData {
         fn from_rows(
             target_name: String,
@@ -199,6 +205,7 @@ mod platform {
             }
         }
 
+        #[cfg(target_os = "macos")]
         fn into_rows(self) -> Vec<Row> {
             self.rows
                 .into_iter()
@@ -325,6 +332,12 @@ mod platform {
         let rows = collect_rows(result.probes, result.stop_hop.unwrap_or(result.max_sent));
         match output {
             TraceOutput::Human => render(&rows).await,
+            TraceOutput::Json => output_trace_json(
+                &cli,
+                &TraceData::from_rows(spec.host, target, max_hops, size, &rows),
+                result.stop_hop,
+                result.terminal_error,
+            )?,
             #[cfg(target_os = "macos")]
             TraceOutput::HelperData => println!(
                 "{}",
@@ -338,6 +351,24 @@ mod platform {
             (Some(_), None) => Ok(()),
             (None, None) => anyhow::bail!("target was not reached within {} hops", max_hops),
         }
+    }
+
+    fn output_trace_json(
+        cli: &Cli,
+        data: &TraceData,
+        stop_hop: Option<u8>,
+        terminal_error: Option<u8>,
+    ) -> Result<()> {
+        if stop_hop.is_none() || terminal_error.is_some() {
+            return Ok(());
+        }
+        let output = serde_json::to_string_pretty(data)?;
+        if let Some(path) = cli.json.as_ref().and_then(Option::as_deref) {
+            crate::session::write_json_file(path, output.as_bytes())?;
+        } else {
+            println!("{output}");
+        }
+        Ok(())
     }
 
     async fn run_probes(
@@ -2287,6 +2318,7 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use clap::Parser;
         use std::net::{Ipv4Addr, Ipv6Addr};
         use std::sync::Mutex;
         use tokio::sync::mpsc;
@@ -3118,6 +3150,98 @@ mod platform {
             let columns: Vec<_> = lines[2].split('|').map(str::trim).collect();
             assert_eq!(columns[1], "*");
             assert_eq!(columns[3], "*");
+        }
+
+        #[test]
+        fn trace_json_uses_the_public_hop_shape() {
+            let rows = vec![
+                Row {
+                    ttl: 1,
+                    nodes: Vec::new(),
+                },
+                Row {
+                    ttl: 2,
+                    nodes: vec![
+                        Node {
+                            ip: "192.0.2.1".parse().unwrap(),
+                            rtts: vec![Duration::from_millis(3), Duration::from_millis(5)],
+                            error: None,
+                        },
+                        Node {
+                            ip: "192.0.2.2".parse().unwrap(),
+                            rtts: vec![Duration::from_millis(7)],
+                            error: Some(3),
+                        },
+                    ],
+                },
+            ];
+            let value = serde_json::to_value(TraceData::from_rows(
+                "example.com".to_string(),
+                "198.51.100.1".parse().unwrap(),
+                64,
+                40,
+                &rows,
+            ))
+            .unwrap();
+
+            assert_eq!(value["target_name"], "example.com");
+            assert_eq!(value["target"], "198.51.100.1");
+            assert_eq!(value["max_hops"], 64);
+            assert_eq!(value["size"], 40);
+            assert_eq!(value["rows"][0]["ttl"], 1);
+            assert_eq!(value["rows"][0]["nodes"], serde_json::json!([]));
+            assert_eq!(value["rows"][1]["nodes"][0]["rtt_ns"], 4_000_000);
+            assert!(value["rows"][1]["nodes"][0]["error"].is_null());
+            assert_eq!(value["rows"][1]["nodes"][1]["error"], 3);
+        }
+
+        #[test]
+        fn trace_json_is_written_only_after_the_target_is_reached() {
+            let path = std::env::temp_dir().join(format!(
+                "pingx-trace-json-success-{}.json",
+                std::process::id()
+            ));
+            std::fs::write(&path, b"existing").unwrap();
+            let cli = Cli::try_parse_from([
+                "pingx",
+                "-R",
+                "example.com",
+                "--json",
+                path.to_str().unwrap(),
+            ])
+            .unwrap();
+            let data = TraceData::from_rows(
+                "example.com".to_string(),
+                "198.51.100.1".parse().unwrap(),
+                32,
+                40,
+                &[Row {
+                    ttl: 1,
+                    nodes: vec![Node {
+                        ip: "192.0.2.1".parse().unwrap(),
+                        rtts: vec![Duration::from_millis(2)],
+                        error: None,
+                    }],
+                }],
+            );
+
+            output_trace_json(&cli, &data, None, None).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"existing");
+            output_trace_json(&cli, &data, Some(2), Some(3)).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"existing");
+
+            std::fs::remove_file(&path).unwrap();
+            output_trace_json(&cli, &data, None, None).unwrap();
+            assert!(!path.exists());
+
+            output_trace_json(&cli, &data, Some(2), None).unwrap();
+            let output = std::fs::read_to_string(&path).unwrap();
+            assert!(output.contains('\n'));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()["max_hops"],
+                32
+            );
+            std::fs::remove_file(path).unwrap();
         }
 
         #[cfg(target_os = "macos")]

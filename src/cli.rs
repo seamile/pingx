@@ -147,8 +147,7 @@ pub struct Cli {
         conflicts_with_all = [
             "http",
             "geo",
-            "fetch_geo",
-            "json"
+            "fetch_geo"
         ]
     )]
     pub traceroute: bool,
@@ -288,11 +287,20 @@ mod tests {
     #[test]
     fn traceroute_rejects_unrelated_modes_and_flags() {
         for args in [
-            vec!["-R", "--json", "example.com"],
             vec!["-R", "-g", "example.com"],
+            vec!["-R", "-H", "example.com"],
         ] {
             assert!(parse(&args).is_err(), "unexpected success for {args:?}");
         }
+    }
+
+    #[test]
+    fn traceroute_accepts_json_output() {
+        let cli = parse(&["-R", "example.com", "--json"]).unwrap();
+        assert_eq!(cli.json, Some(None));
+
+        let cli = parse(&["-R", "example.com", "--json", "route.json"]).unwrap();
+        assert_eq!(cli.json, Some(Some("route.json".to_string())));
     }
 
     #[test]
@@ -379,7 +387,18 @@ mod tests {
             ),
             (
                 trace,
-                vec!["-R", "--max-hops", "-T", "-U", "-4", "-6", "-I", "-s", "-W"],
+                vec![
+                    "-R",
+                    "--max-hops",
+                    "-T",
+                    "-U",
+                    "-4",
+                    "-6",
+                    "-I",
+                    "-s",
+                    "-W",
+                    "--json",
+                ],
             ),
             (geo, vec!["-g", "--fetch-geo", "-I", "--json"]),
         ] {
