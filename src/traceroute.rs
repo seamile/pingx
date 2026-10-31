@@ -268,19 +268,13 @@ mod platform {
         };
         let addrs = resolve_host(&spec.host, version).await?;
         let target = select_target(addrs)?;
-        let requested = cli
-            .targets
-            .get(1)
-            .map(|value| value.parse::<usize>())
-            .transpose()
-            .map_err(|_| anyhow::anyhow!("traceroute packet size must be an integer"))?;
         let max_hops = cli.max_hops;
         anyhow::ensure!(
             cli.timeout > Duration::ZERO,
             "traceroute timeout must be greater than zero"
         );
         let timeout = cli.timeout;
-        let size = packet_size(target, requested, protocol)?;
+        let size = packet_size(target, cli.size, protocol)?;
         if protocol == TraceProtocol::Udp {
             validate_udp_port_range(trace_port, max_hops)?;
         }

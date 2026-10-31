@@ -675,7 +675,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(1),
             deadline: None,
             ttl: 64,
-            size: 56,
+            size: Some(56),
             quiet: false,
             ipv4: false,
             ipv6: false,
@@ -688,7 +688,7 @@ mod tests {
             interface: None,
             traceroute: false,
             udp: false,
-            max_hops: 64,
+            max_hops: crate::cli::DEFAULT_TRACEROUTE_MAX_HOPS,
         };
 
         // 1. Basic ICMP (Domain)

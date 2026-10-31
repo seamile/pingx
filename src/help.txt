@@ -1,0 +1,66 @@
+A versatile network diagnostic tool for Ping, traceroute, and GeoIP lookup.
+
+Usage: pingx [OPTIONS] [TARGETS]...
+
+Arguments:
+  [TARGETS]...  IP addresses, domain names, HOST:PORT endpoints, or HTTP URLs.
+                Traceroute requires exactly one target. Use [IPv6]:PORT for IPv6 ports.
+
+Options:
+  -h, --help                Print help
+  -V, --version             Print version
+
+Ping Options:
+  -c <COUNT>                Stop after sending COUNT probes per target
+  -i <INTERVAL>             Probe interval, in seconds [default: 1.0]
+  -w <DEADLINE>             Stop after DEADLINE seconds
+  -t <TTL>                  IP Time to Live [default: 64]
+  -q                        Show only startup information and final statistics
+  -H, --http                Use HTTP probes
+      --header <HEADER>     Add an HTTP header; may be repeated
+  -T, --tcp                 Use TCP SYN probes [default port: 80]
+  -U, --udp                 Use UDP probes [default port: 33434]
+  -4                        Force IPv4
+  -6                        Force IPv6
+  -I, --interface <IFACE>    Bind DNS and probes to an interface (Unix only)
+  -s <SIZE>                 ICMP/UDP payload size, in bytes [default: 56]
+  -W <TIMEOUT>              Response timeout, in seconds [default: 1.0]
+      --json [<FILE>]       Output JSON to stdout or FILE
+
+Traceroute Options:
+  -R, --traceroute          Trace the route to one target
+      --max-hops <MAX_HOPS>  Maximum number of hops [default: 32]
+  -T, --tcp                 Use TCP SYN probes [default port: 80]
+  -U, --udp                 Use UDP probes [default base port: 33434]
+  -4                        Force IPv4
+  -6                        Force IPv6
+  -I, --interface <IFACE>    Bind DNS and probes to an interface (Unix only)
+  -s <SIZE>                 Total IP packet size, in bytes [default: IPv4 40, IPv6 60]
+  -W <TIMEOUT>              Response timeout, in seconds [default: 1.0]
+
+Geo Options:
+  -g, --geo                 Look up target locations and exit
+      --fetch-geo           Download or update the GeoIP databases and exit
+  -I, --interface <IFACE>    Use an interface for DNS and downloads (Unix only)
+      --json [<FILE>]       Output lookup results as JSON to stdout or FILE
+
+Helper Commands (macOS):
+  pingx helper install      Install or update the privileged helper
+  pingx helper status       Show helper installation and authorization status
+  pingx helper uninstall    Remove the privileged helper
+
+Notes:
+  Without -T, -U, or -H, the target format selects the protocol:
+  HOST uses ICMP, HOST:PORT uses TCP, and an HTTP URL uses HTTP.
+
+  -T, -U, and -H are mutually exclusive; -4 and -6 are mutually exclusive.
+  Traceroute does not support HTTP, GeoIP mode, or JSON output.
+  Ping-only options are ignored in traceroute mode.
+
+  TCP probes are half-open: SYN-ACK indicates open; RST indicates closed.
+  Closed TCP ports and UDP port-unreachable replies count as received responses.
+  TCP Ping ignores -s; TCP traceroute requires 40 bytes for IPv4 or 60 for IPv6.
+
+  macOS offers to install or update the privileged helper when needed.
+  Windows UDP/TCP Ping and traceroute require Administrator access,
+  with WinDivert.dll and WinDivert64.sys beside pingx.exe.

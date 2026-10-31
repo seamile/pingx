@@ -3,21 +3,24 @@ use std::time::Duration;
 
 pub use crate::probe::{Protocol, ProtocolMode, TargetSpec};
 
+pub const DEFAULT_PING_SIZE: usize = 56;
+pub const DEFAULT_TRACEROUTE_MAX_HOPS: u8 = 32;
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
     version,
     about = "A versatile network diagnostic tool to replace system ping/ping6.",
     long_about = None,
-    after_help = "TCP probes send a half-open SYN; SYN-ACK means open and RST means closed. Closed or rejected TCP/UDP ports count as received responses. macOS privileged probes use the root-owned launchd helper after `pingx helper install`. Windows UDP/TCP Ping and traceroute require Administrator access and WinDivert.dll plus WinDivert64.sys beside pingx.exe."
+    override_help = include_str!("help.txt")
 )]
 pub struct Cli {
-    /// Targets. In traceroute mode: HOST[:PORT] [PACKET_LEN]; use [IPv6]:PORT for IPv6 ports.
+    /// Targets. In traceroute mode, specify exactly one HOST[:PORT]; use -s for packet size.
     #[arg(required_unless_present = "fetch_geo")]
     pub targets: Vec<String>,
 
     /// Stop after sending N packets.
-    #[arg(short = 'c', overrides_with = "count", conflicts_with = "traceroute")]
+    #[arg(short = 'c', overrides_with = "count", help_heading = "Ping Options")]
     pub count: Option<u64>,
 
     /// Wait N seconds between sending each packet.
@@ -26,12 +29,12 @@ pub struct Cli {
         default_value = "1.0",
         value_parser = parse_duration,
         overrides_with = "interval",
-        conflicts_with = "traceroute"
+        help_heading = "Ping Options"
     )]
     pub interval: Duration,
 
     /// Time to wait for a response, in seconds.
-    #[arg(short = 'W', default_value = "1.0", value_parser = parse_duration, overrides_with = "timeout")]
+    #[arg(short = 'W', default_value = "1.0", value_parser = parse_duration, overrides_with = "timeout", help_heading = "Common Options")]
     pub timeout: Duration,
 
     /// Stop running after N seconds.
@@ -39,7 +42,7 @@ pub struct Cli {
         short = 'w',
         value_parser = parse_duration,
         overrides_with = "deadline",
-        conflicts_with = "traceroute"
+        help_heading = "Ping Options"
     )]
     pub deadline: Option<Duration>,
 
@@ -48,26 +51,25 @@ pub struct Cli {
         short = 't',
         default_value = "64",
         overrides_with = "ttl",
-        conflicts_with = "traceroute"
+        help_heading = "Ping Options"
     )]
     pub ttl: u32,
 
-    /// Size of ICMP or UDP payload in bytes, up to 65507 for UDP. TCP SYN probes ignore this option.
-    #[arg(
-        short = 's',
-        default_value = "56",
-        overrides_with = "size",
-        conflicts_with = "traceroute",
-        help_heading = "Ping options"
-    )]
-    pub size: usize,
+    /// Set packet size. Ping uses a payload size (default 56); traceroute uses total IP packet size (default 40/60).
+    #[arg(short = 's', overrides_with = "size", help_heading = "Ping Options")]
+    pub size: Option<usize>,
 
     /// Quiet output. Nothing is displayed except the summary lines at startup time and when finished.
-    #[arg(short = 'q', conflicts_with = "traceroute")]
+    #[arg(short = 'q', help_heading = "Ping Options")]
     pub quiet: bool,
 
     /// Use this network interface for DNS, probes, HTTP, and GeoIP (Unix only).
-    #[arg(short = 'I', long = "interface", value_name = "IFACE")]
+    #[arg(
+        short = 'I',
+        long = "interface",
+        value_name = "IFACE",
+        help_heading = "Common Options"
+    )]
     pub interface: Option<String>,
 
     // Mode Flags (Mutually Exclusive via 'mode' group)
@@ -75,7 +77,8 @@ pub struct Cli {
     #[arg(
         short = '4',
         group = "family",
-        conflicts_with_all = ["geo", "fetch_geo"]
+        conflicts_with_all = ["geo", "fetch_geo"],
+        help_heading = "Common Options"
     )]
     pub ipv4: bool,
 
@@ -83,50 +86,66 @@ pub struct Cli {
     #[arg(
         short = '6',
         group = "family",
-        conflicts_with_all = ["geo", "fetch_geo"]
+        conflicts_with_all = ["geo", "fetch_geo"],
+        help_heading = "Common Options"
     )]
     pub ipv6: bool,
 
     /// Force TCP ping. Omit the target port to use 80; with -R, use TCP traceroute.
-    #[arg(long = "tcp", short = 'T', group = "mode")]
+    #[arg(
+        long = "tcp",
+        short = 'T',
+        group = "mode",
+        help_heading = "Ping Options"
+    )]
     pub tcp: bool,
 
     /// Force UDP ping. Omit the target port to use 33434; with -R, use UDP traceroute.
-    #[arg(long = "udp", short = 'U', group = "mode")]
+    #[arg(
+        long = "udp",
+        short = 'U',
+        group = "mode",
+        help_heading = "Ping Options"
+    )]
     pub udp: bool,
 
     /// Force HTTP ping.
-    #[arg(short = 'H', long = "http", group = "mode")]
+    #[arg(
+        short = 'H',
+        long = "http",
+        group = "mode",
+        help_heading = "Ping Options"
+    )]
     pub http: bool,
 
     /// Custom HTTP headers (e.g., "Host: example.com"). Can be specified multiple times.
-    #[arg(long = "header", conflicts_with = "traceroute")]
+    #[arg(long = "header", help_heading = "Ping Options")]
     pub headers: Vec<String>,
 
     /// GeoIP lookup mode. Displays location information for the targets and exits.
-    #[arg(short = 'g', long = "geo", group = "mode")]
+    #[arg(
+        short = 'g',
+        long = "geo",
+        group = "mode",
+        help_heading = "Geo Options"
+    )]
     pub geo: bool,
 
     /// Fetch/Update the GeoIP database.
-    #[arg(long = "fetch-geo", group = "mode")]
+    #[arg(long = "fetch-geo", group = "mode", help_heading = "Geo Options")]
     pub fetch_geo: bool,
 
     /// Output results in JSON format. Optional value specifies output file.
-    #[arg(long = "json", num_args = 0..=1, value_name = "FILE")]
+    #[arg(long = "json", num_args = 0..=1, value_name = "FILE", help_heading = "Common Options")]
     pub json: Option<Option<String>>,
 
     /// Trace the route to a single IPv4, IPv6, or domain target.
     #[arg(
         short = 'R',
         long = "traceroute",
-        help_heading = "Traceroute options",
+        help_heading = "Traceroute Options",
         conflicts_with_all = [
-            "count",
-            "interval",
-            "deadline",
-            "ttl",
             "http",
-            "headers",
             "geo",
             "fetch_geo",
             "json"
@@ -137,10 +156,10 @@ pub struct Cli {
     /// Maximum number of hops. Requires -R.
     #[arg(
         long = "max-hops",
-        default_value_t = 64,
+        default_value_t = DEFAULT_TRACEROUTE_MAX_HOPS,
         value_parser = clap::value_parser!(u8).range(1..=255),
         requires = "traceroute",
-        help_heading = "Traceroute options"
+        help_heading = "Traceroute Options"
     )]
     pub max_hops: u8,
 }
@@ -163,11 +182,19 @@ impl Cli {
     }
 
     pub fn trace_target(&self) -> anyhow::Result<TargetSpec> {
+        anyhow::ensure!(
+            self.targets.len() == 1,
+            "traceroute mode requires exactly one target"
+        );
         let input = self
             .targets
             .first()
             .ok_or_else(|| anyhow::anyhow!("traceroute requires a target"))?;
         self.target_spec(input)
+    }
+
+    pub fn ping_size(&self) -> usize {
+        self.size.unwrap_or(DEFAULT_PING_SIZE)
     }
 }
 
@@ -184,6 +211,7 @@ fn parse_duration(arg: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("pingx").chain(args.iter().copied()))
@@ -262,11 +290,34 @@ mod tests {
         for args in [
             vec!["-R", "--json", "example.com"],
             vec!["-R", "-g", "example.com"],
-            vec!["-R", "-c", "2", "example.com"],
-            vec!["-R", "-t", "2", "example.com"],
         ] {
             assert!(parse(&args).is_err(), "unexpected success for {args:?}");
         }
+    }
+
+    #[test]
+    fn traceroute_ignores_ping_options() {
+        let cli = parse(&[
+            "-R",
+            "-c",
+            "2",
+            "-i",
+            "0.2",
+            "-w",
+            "3",
+            "-t",
+            "2",
+            "-s",
+            "32",
+            "-q",
+            "--header",
+            "Host: example.com",
+            "example.com",
+        ])
+        .unwrap();
+        assert_eq!(cli.count, Some(2));
+        assert_eq!(cli.size, Some(32));
+        assert!(cli.quiet);
     }
 
     #[test]
@@ -282,15 +333,67 @@ mod tests {
     #[test]
     fn size_keeps_its_normal_ping_default() {
         let cli = parse(&["example.com"]).unwrap();
-        assert_eq!(cli.size, 56);
-        assert_eq!(parse(&["-s", "32", "example.com"]).unwrap().size, 32);
+        assert_eq!(cli.size, None);
+        assert_eq!(cli.ping_size(), 56);
+        assert_eq!(parse(&["-s", "32", "example.com"]).unwrap().ping_size(), 32);
     }
 
     #[test]
-    fn traceroute_keeps_positional_targets_for_legacy_cli() {
+    fn traceroute_uses_size_and_requires_one_target() {
         let cli = parse(&["-R", "example.com"]).unwrap();
         assert_eq!(cli.targets, ["example.com"]);
-        assert!(parse(&["-R", "-s", "56", "example.com"]).is_err());
+        assert_eq!(cli.size, None);
+        assert_eq!(cli.max_hops, DEFAULT_TRACEROUTE_MAX_HOPS);
+        assert_eq!(
+            parse(&["-R", "-s", "56", "example.com"]).unwrap().size,
+            Some(56)
+        );
+        assert!(
+            parse(&["-R", "example.com", "56"])
+                .unwrap()
+                .trace_target()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn help_lists_mode_groups_and_helper_commands() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("Ping Options"));
+        assert!(help.contains("Traceroute Options"));
+        assert!(help.contains("Geo Options"));
+        assert!(help.contains("pingx helper install"));
+        assert!(!help.contains("Common Options"));
+        assert!(!help.contains("Mode options:"));
+        let ping = help.split("Ping Options:\n").nth(1).unwrap();
+        let (ping, rest) = ping.split_once("Traceroute Options:\n").unwrap();
+        let (trace, rest) = rest.split_once("Geo Options:\n").unwrap();
+        let (geo, _) = rest.split_once("Helper Commands (macOS):\n").unwrap();
+        for (section, flags) in [
+            (
+                ping,
+                vec![
+                    "-c", "-i", "-w", "-t", "-q", "-H", "--header", "-T", "-U", "-4", "-6", "-I",
+                    "-s", "-W", "--json",
+                ],
+            ),
+            (
+                trace,
+                vec!["-R", "--max-hops", "-T", "-U", "-4", "-6", "-I", "-s", "-W"],
+            ),
+            (geo, vec!["-g", "--fetch-geo", "-I", "--json"]),
+        ] {
+            let mut remaining = section;
+            for flag in flags {
+                remaining = remaining.split_once(flag).unwrap().1;
+            }
+        }
+        for flag in ["-h", "--help"] {
+            let error = parse(&[flag]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert_eq!(error.to_string(), help);
+        }
+        assert_eq!(Cli::command().render_long_help().to_string(), help);
     }
 
     #[test]

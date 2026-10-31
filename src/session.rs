@@ -250,12 +250,17 @@ impl Session {
                     );
 
                     if show_headers && !json_stdout {
-                        Self::print_header(target_string, target_addr, &protocol, self.cli.size);
+                        Self::print_header(
+                            target_string,
+                            target_addr,
+                            &protocol,
+                            self.cli.ping_size(),
+                        );
                     }
 
                     let config = crate::pinger::PingerConfig {
                         ttl: self.cli.ttl,
-                        size: self.cli.size,
+                        size: self.cli.ping_size(),
                         timeout: self.cli.timeout,
                         headers: headers.clone(),
                     };
@@ -426,7 +431,7 @@ impl Session {
                         protocol: protocol_str,
                         target_port: protocol.port(),
                         ip: stats._address.to_string(),
-                        packet_size: self.cli.size,
+                        packet_size: self.cli.ping_size(),
                         ttl: self.cli.ttl,
                         sent: stats.transmitted,
                         received: stats.received,
@@ -505,7 +510,7 @@ impl Session {
                 match kind {
                     models::ResponseType::IcmpEchoReply => {
                         println!(
-                            "{} bytes from {}: {}={}{} time={:.3} ms",
+                            "{} bytes from {}: {}={} status=reply{} time={:.3} ms",
                             result.bytes,
                             result.target_addr,
                             seq_prefix,
@@ -515,34 +520,34 @@ impl Session {
                         );
                     }
                     models::ResponseType::TcpOpen | models::ResponseType::TcpClosed => {
-                        let state = if matches!(kind, models::ResponseType::TcpOpen) {
+                        let status = if matches!(kind, models::ResponseType::TcpOpen) {
                             "open"
                         } else {
                             "closed"
                         };
                         println!(
-                            "from {}: {}={} state={}{} time={:.3} ms",
+                            "from {}: {}={} status={}{} time={:.3} ms",
                             result.target_addr,
                             seq_prefix,
                             result.seq,
-                            state,
+                            status,
                             ttl_str,
                             result.rtt.as_secs_f64() * 1000.0
                         );
                     }
                     models::ResponseType::UdpApplicationReply
                     | models::ResponseType::UdpPortUnreachable => {
-                        let state = if matches!(kind, models::ResponseType::UdpApplicationReply) {
-                            "application reply"
+                        let status = if matches!(kind, models::ResponseType::UdpApplicationReply) {
+                            "reply"
                         } else {
-                            "port unreachable"
+                            "port_unreachable"
                         };
                         println!(
-                            "from {}: {}={} {}{} time={:.3} ms",
+                            "from {}: {}={} status={}{} time={:.3} ms",
                             result.target_addr,
                             seq_prefix,
                             result.seq,
-                            state,
+                            status,
                             ttl_str,
                             result.rtt.as_secs_f64() * 1000.0
                         );
@@ -561,17 +566,23 @@ impl Session {
                 }
             }
             models::ProbeStatus::Timeout => {
-                println!("Request timeout for {}={}", seq_prefix, result.seq);
+                println!(
+                    "from {}: {}={} status=timeout",
+                    result.target_addr, seq_prefix, result.seq
+                );
             }
             models::ProbeStatus::NetworkError { node, reason } => {
                 let node = node.map(|node| format!(" from {node}")).unwrap_or_default();
                 eprintln!(
-                    "Network error{node} for {}={}: {}",
+                    "Network error{node}: {}={} status=network_error reason={}",
                     seq_prefix, result.seq, reason
                 );
             }
             models::ProbeStatus::LocalError(error) => {
-                eprintln!("Local error for {}={}: {}", seq_prefix, result.seq, error);
+                eprintln!(
+                    "Local error: {}={} status=local_error error={}",
+                    seq_prefix, result.seq, error
+                );
             }
         }
     }

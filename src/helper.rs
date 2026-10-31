@@ -104,7 +104,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 3;
+    const PROTOCOL_VERSION: u16 = 4;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -184,7 +184,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct TraceOperation {
         target: String,
-        packet_len: Option<String>,
+        size: Option<usize>,
         timeout_ns: u64,
         interface: Option<String>,
         ipv4: bool,
@@ -229,7 +229,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 .ok_or_else(|| anyhow::anyhow!("traceroute requires a target"))?;
             return Ok(Some(Operation::Trace(TraceOperation {
                 target: target.clone(),
-                packet_len: cli.targets.get(1).cloned(),
+                size: cli.size,
                 timeout_ns: duration_ns(cli.timeout)?,
                 interface: cli.interface.clone(),
                 ipv4: cli.ipv4,
@@ -265,7 +265,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             timeout_ns: duration_ns(cli.timeout)?,
             deadline_ns: cli.deadline.map(duration_ns).transpose()?,
             ttl: cli.ttl,
-            size: cli.size,
+            size: cli.ping_size(),
             quiet: cli.quiet,
             interface: cli.interface.clone(),
             ipv4: cli.ipv4,
@@ -353,15 +353,12 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                     (1..=255).contains(&trace.max_hops),
                     "max hops must be 1..=255"
                 );
-                if let Some(size) = trace.packet_len.as_deref() {
-                    let size = size
-                        .parse::<usize>()
-                        .context("traceroute packet size must be an integer")?;
-                    anyhow::ensure!(
-                        (1..=u16::MAX as usize).contains(&size),
-                        "invalid packet size"
-                    );
-                }
+                anyhow::ensure!(
+                    trace
+                        .size
+                        .is_none_or(|size| (1..=u16::MAX as usize).contains(&size)),
+                    "invalid packet size"
+                );
                 validate_interface(trace.interface.as_deref())?;
                 let cli = trace.to_cli();
                 anyhow::ensure!(
@@ -396,7 +393,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 timeout: Duration::from_nanos(self.timeout_ns),
                 deadline: self.deadline_ns.map(Duration::from_nanos),
                 ttl: self.ttl,
-                size: self.size,
+                size: Some(self.size),
                 quiet: self.quiet,
                 interface: self.interface.clone(),
                 ipv4: self.ipv4,
@@ -410,25 +407,21 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 // The root worker must never write to a caller-selected path.
                 json: self.json.then_some(None),
                 traceroute: false,
-                max_hops: 64,
+                max_hops: crate::cli::DEFAULT_TRACEROUTE_MAX_HOPS,
             }
         }
     }
 
     impl TraceOperation {
         fn to_cli(&self) -> Cli {
-            let mut targets = vec![self.target.clone()];
-            if let Some(packet_len) = &self.packet_len {
-                targets.push(packet_len.clone());
-            }
             Cli {
-                targets,
+                targets: vec![self.target.clone()],
                 count: None,
                 interval: Duration::from_secs(1),
                 timeout: Duration::from_nanos(self.timeout_ns),
                 deadline: None,
                 ttl: 64,
-                size: 56,
+                size: self.size,
                 quiet: false,
                 interface: self.interface.clone(),
                 ipv4: self.ipv4,
@@ -1500,7 +1493,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 timeout: Duration::from_secs(1),
                 deadline: None,
                 ttl: 64,
-                size: 56,
+                size: Some(56),
                 quiet: false,
                 interface: None,
                 ipv4: false,
@@ -1513,7 +1506,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 fetch_geo: false,
                 json: None,
                 traceroute: false,
-                max_hops: 64,
+                max_hops: crate::cli::DEFAULT_TRACEROUTE_MAX_HOPS,
             }
         }
 

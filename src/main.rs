@@ -65,24 +65,6 @@ async fn main() {
             eprintln!("pingx: {}", error);
             std::process::exit(2);
         }
-        if !(1..=2).contains(&args.targets.len()) {
-            eprintln!("pingx: traceroute mode requires a target and an optional packet size");
-            std::process::exit(2);
-        }
-        if let Some(size) = args.targets.get(1) {
-            let Ok(value) = size.parse::<usize>() else {
-                eprintln!("pingx: traceroute packet size must be an integer");
-                std::process::exit(2);
-            };
-            if value == 0 || value > u16::MAX as usize {
-                eprintln!("pingx: traceroute packet size must be between 1 and 65535 bytes");
-                std::process::exit(2);
-            }
-        }
-        if args.quiet {
-            eprintln!("pingx: traceroute output cannot be quiet");
-            std::process::exit(2);
-        }
         match helper::run_if_needed(&args).await {
             Ok(Some(code)) => std::process::exit(code),
             Ok(None) => {}

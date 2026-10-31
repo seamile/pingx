@@ -129,14 +129,14 @@ pingx 1.1.1.1 www.github.com
 
 ### Traceroute Mode
 
-Use `-R` to trace the route to one IPv4, IPv6, or domain target. An optional second positional argument sets the total IP packet size, matching system `traceroute`:
+Use `-R` to trace the route to one IPv4, IPv6, or domain target. `-s` sets the total IP packet size:
 
 ```shell
 pingx -R 1.1.1.1
 pingx -R 2400:3200::1
 pingx -R example.com
 pingx -R -4 --max-hops 24 example.com
-pingx -R example.com 64
+pingx -R example.com -s 64
 pingx -R -I en0 example.com
 pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
@@ -145,17 +145,17 @@ pingx -R -6 -T '[2001:db8::1]:443'
 pingx -R -U 1.1.1.1:33434
 ```
 
-Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP 40/60 bytes. TCP traceroute packet length is fixed at those values; passing a different `PACKET_LEN` is an error.
+Minimum total packet lengths: ICMP 28/48 bytes (IPv4/IPv6), UDP 32/52 bytes, TCP 40/60 bytes. TCP traceroute packet length is fixed at those values; passing a different `-s` value is an error.
 
-`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP. `-T` forces TCP and defaults to port 80; `-U` forces UDP and defaults to base port 33434. `-4` and `-6` only restrict the resolved address family. Use `[IPv6]:PORT` for IPv6 ports. UDP probes use successive destination ports; TCP probes reserve a distinct local source port for each active probe. There is no separate port option.
+`pingx -R HOST` uses ICMP by default; `pingx -R HOST:PORT` selects TCP. `-T` forces TCP and defaults to port 80; `-U` forces UDP and defaults to base port 33434. `-s` defaults to 40 bytes for IPv4 and 60 bytes for IPv6. `-4` and `-6` only restrict the resolved address family. Use `[IPv6]:PORT` for IPv6 ports. UDP probes use successive destination ports; TCP probes reserve a distinct local source port for each active probe. There is no separate port option.
 
-Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. Each displayed RTT is the average of matching replies, and a fully unanswered hop shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; the positional `PACKET_LEN` overrides the total IP packet size for ICMP and UDP.
+Each hop is probed three times. The probe stream runs concurrently across hops and stops sending higher TTLs after the target replies. Each displayed RTT is the average of matching replies, and a fully unanswered hop shows `*` in both the IP and RTT columns. A hop answered by multiple nodes gets one row per node, each with its own location. Private, loopback, link-local, and IPv6 unique-local addresses show `Internal node` in the Location column. Long values are truncated to keep the table aligned. The default probe packet is 40 bytes for IPv4 and 60 bytes for IPv6; `-s` overrides the total IP packet size for ICMP and UDP.
 
 On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads ICMP errors from the socket error queue and does not require RAW privileges. On macOS, traceroute modes use a privileged RAW socket; a normal user reaches it through the installed helper. On Windows, all traceroute modes require an Administrator terminal and the WinDivert runtime beside `pingx.exe`. GeoIP lookup uses the existing IP2Location database and shows `-` when no location is available; it does not download a database automatically.
 
 ### Response Semantics
 
-TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `open`; an RST is reported as `closed` and still counts as a received response with its RTT. UDP application replies and target Port Unreachable errors also count as received. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
+TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `status=open`; an RST is reported as `status=closed` and still counts as a received response with its RTT. UDP application replies are `status=reply`; target Port Unreachable errors are `status=port_unreachable`; both count as received. Other outcomes use `status=timeout`, `status=network_error`, or `status=local_error` as appropriate. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
 
 JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state.
 
@@ -193,8 +193,8 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: Stop running after deadline seconds.
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
 - `-t <TTL>`: Set the IP Time to Live (default 64).
-- `-s <SIZE>`: Size of ICMP or UDP payload in bytes (default 56); UDP payloads are limited to 65507 bytes, and TCP probes ignore it.
-- `--max-hops <N>`: Traceroute hop limit (default 64; `-R` only).
+- `-s <SIZE>`: Ping payload size (default 56); in traceroute, total IP packet size (default 40/60 for IPv4/IPv6).
+- `--max-hops <N>`: Traceroute hop limit (default 32; `-R` only).
 - `-T` / `--tcp`: Use half-open TCP SYN probing (default port 80).
 - `-U` / `--udp`: Use UDP (default port 33434).
 - `HOST:PORT`: TCP target port, or UDP port when `-U` is set; use `[IPv6]:PORT` for IPv6.
@@ -335,14 +335,14 @@ pingx 1.1.1.1 www.github.com
 
 ### 路由追踪模式
 
-使用 `-R` 追踪一个 IPv4、IPv6 或域名目标；可在目标后添加一个可选的 IP 报文总长度，与系统 `traceroute` 一致：
+使用 `-R` 追踪一个 IPv4、IPv6 或域名目标；通过 `-s` 设置 IP 报文总长度：
 
 ```shell
 pingx -R 1.1.1.1
 pingx -R 2400:3200::1
 pingx -R example.com
 pingx -R -4 --max-hops 24 example.com
-pingx -R example.com 64
+pingx -R example.com -s 64
 pingx -R -I en0 example.com
 pingx -R -U 1.1.1.1
 pingx -R 1.1.1.1:443
@@ -351,15 +351,15 @@ pingx -R -6 -T '[2001:db8::1]:443'
 pingx -R -U 1.1.1.1:33434
 ```
 
-`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP。`-T` 强制 TCP 且省略端口时默认 80，`-U` 强制 UDP 且省略端口时默认基础端口 33434。`-4` 和 `-6` 只限制地址族。IPv6 带端口使用 `[IPv6]:PORT`。UDP 使用递增的目的端口，TCP 会为每个活动探测预留一个独立的本地源端口。不提供独立端口参数。
+`pingx -R HOST` 默认使用 ICMP；`pingx -R HOST:PORT` 自动选择 TCP。`-T` 强制 TCP 且省略端口时默认 80，`-U` 强制 UDP 且省略端口时默认基础端口 33434。`-s` 设置路由追踪的 IP 报文总长度，IPv4/IPv6 默认分别为 40/60 字节。`-4` 和 `-6` 只限制地址族。IPv6 带端口使用 `[IPv6]:PORT`。UDP 使用递增的目的端口，TCP 会为每个活动探测预留一个独立的本地源端口。不提供独立端口参数。
 
-每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。每个显示值是对应响应的平均 RTT；整跳无响应时在 IP 和 RTT 列显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；第二个位置参数可覆盖 ICMP/UDP 的 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40/60 字节。TCP 路由追踪包长固定，显式传入其他值会报错。
+每一跳发送三次探测。不同 TTL 使用流水线并发发送，收到目标回复后不再发送更高 TTL。每个显示值是对应响应的平均 RTT；整跳无响应时在 IP 和 RTT 列显示 `*`。同一跳若收到多个节点的回复，每个节点单独一行，并分别显示位置。私有地址、回环地址、链路本地地址和 IPv6 唯一本地地址在 Location 列显示 `Internal node`。过长内容会截断以保持表格对齐。默认探测包为 40 字节 IPv4 或 60 字节 IPv6；`-s`可覆盖 ICMP/UDP 的 IP 报文总长度。最小总长度：ICMP 为 28/48 字节（IPv4/IPv6），UDP 为 32/52 字节，TCP 为 40/60 字节。TCP 路由追踪包长固定，显式传入其他值会报错。
 
 Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错误队列读取 ICMP 错误，不需要 RAW 权限。macOS 的路由追踪使用特权 RAW socket，普通用户通过已安装的 helper 使用。Windows 的所有路由追踪模式需要管理员终端，并将 WinDivert 运行文件放在 `pingx.exe` 同目录。位置复用现有 IP2Location 数据库，查询不到时显示 `-`，不会自动下载数据库。
 
 ### 响应语义
 
-TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `open`；收到 RST 显示 `closed`，仍计为成功响应并记录 RTT。UDP 应用响应和目标返回的 Port Unreachable 也都计入成功响应。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
+TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `status=open`；收到 RST 显示 `status=closed`，仍计为成功响应并记录 RTT。UDP 应用响应为 `status=reply`，目标返回的 Port Unreachable 为 `status=port_unreachable`，两者都计入成功响应。其他结果使用 `status=timeout`、`status=network_error` 或 `status=local_error`。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
 
 JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。
 
@@ -397,8 +397,8 @@ pingx -g 8.8.8.8 --json
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
 - `-t <TTL>`: 设置 IP 生存时间 (TTL)，默认 64。
-- `-s <SIZE>`: ICMP 或 UDP 载荷大小（默认 56 字节，UDP 最大 65507 字节）；TCP 探测忽略该参数。
-- `--max-hops <N>`: 路由追踪最大跳数（默认 64，仅用于 `-R`）。
+- `-s <SIZE>`: Ping 的载荷大小（默认 56 字节）；路由追踪使用 IP 报文总长度（IPv4/IPv6 默认 40/60 字节）。
+- `--max-hops <N>`: 路由追踪最大跳数（默认 32，仅用于 `-R`）。
 - `-T` / `--tcp`: 使用半开 TCP SYN 探测（默认端口 80）。
 - `-U` / `--udp`: 使用 UDP（默认端口 33434）。
 - `HOST:PORT`：TCP 目标端口，或配合 `-U` 设置 UDP 端口；IPv6 使用 `[IPv6]:PORT`。
