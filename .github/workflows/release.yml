@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build'
+        required: true
+        default: dev
+        type: string
+      tag_name:
+        description: 'GitHub Release tag'
+        required: true
+        default: v0.2.2-dev
+        type: string
 
 jobs:
   build:
@@ -32,6 +44,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -98,12 +112,15 @@ jobs:
       - name: Upload Artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          target_commitish: ${{ inputs.ref || github.sha }}
           files: ${{ matrix.asset_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
     name: Publish to Crates.io
+    if: github.event_name == 'push' && !contains(github.ref_name, '-')
     needs: build
     runs-on: ubuntu-latest
     steps:
