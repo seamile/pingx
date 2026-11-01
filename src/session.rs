@@ -816,10 +816,9 @@ fn timestamp_prefix_at(format: crate::cli::TimestampFormat, now: SystemTime) -> 
     match format {
         TimestampFormat::Unix => Ok(format!("[{}.{:06}] ", now.as_secs(), now.subsec_micros())),
         TimestampFormat::Iso => {
-            let local = time::OffsetDateTime::from_unix_timestamp_nanos(now.as_nanos() as i128)?
-                .to_offset(time::UtcOffset::current_local_offset()?);
-            let value = local.format(time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
+            let utc = time::OffsetDateTime::from_unix_timestamp_nanos(now.as_nanos() as i128)?;
+            let value = utc.format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z"
             ))?;
             Ok(format!("{value} "))
         }
@@ -831,13 +830,22 @@ fn timestamp_prefix(format: crate::cli::TimestampFormat) -> Result<String> {
 }
 
 fn json_timestamp(format: crate::cli::TimestampFormat) -> Result<JsonTimestamp> {
+    json_timestamp_at(format, SystemTime::now())
+}
+
+fn json_timestamp_at(
+    format: crate::cli::TimestampFormat,
+    now: SystemTime,
+) -> Result<JsonTimestamp> {
     use crate::cli::TimestampFormat;
 
-    let now = SystemTime::now()
+    let now = now
         .duration_since(UNIX_EPOCH)
         .map_err(|error| anyhow::anyhow!("system clock is before Unix epoch: {error}"))?;
     match format {
-        TimestampFormat::Unix => Ok(JsonTimestamp::Unix(now.as_secs_f64())),
+        TimestampFormat::Unix => Ok(JsonTimestamp::Unix(
+            format!("{}.{:06}", now.as_secs(), now.subsec_micros()).parse()?,
+        )),
         TimestampFormat::Iso => Ok(JsonTimestamp::Iso(
             timestamp_prefix_at(format, UNIX_EPOCH + now)?
                 .trim()
@@ -862,22 +870,46 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_prefix_formats_unix_microseconds_and_local_iso_milliseconds() {
+    fn timestamp_prefix_formats_unix_and_utc_iso_microseconds() {
         let now = UNIX_EPOCH + Duration::from_micros(1_793_427_601_123_456);
         assert_eq!(
             timestamp_prefix_at(crate::cli::TimestampFormat::Unix, now).unwrap(),
             "[1793427601.123456] "
         );
 
-        let prefix = timestamp_prefix_at(crate::cli::TimestampFormat::Iso, now).unwrap();
-        assert!(prefix.ends_with(' '));
-        assert_eq!(&prefix[4..5], "-");
-        assert_eq!(&prefix[7..8], "-");
-        assert_eq!(&prefix[10..11], " ");
-        assert_eq!(&prefix[13..14], ":");
-        assert_eq!(&prefix[16..17], ":");
-        assert_eq!(&prefix[19..20], ".");
-        assert_eq!(prefix.trim_end().len(), 23);
+        assert_eq!(
+            timestamp_prefix_at(crate::cli::TimestampFormat::Iso, now).unwrap(),
+            "2026-10-31T06:20:01.123456Z "
+        );
+    }
+
+    #[test]
+    fn timestamps_keep_six_digits_and_truncate_nanoseconds() {
+        use crate::cli::TimestampFormat::{Iso, Unix};
+        for (nanos, fraction) in [
+            (0, "000000"),
+            (120_000_000, "120000"),
+            (123_456_999, "123456"),
+        ] {
+            let now = UNIX_EPOCH + Duration::new(1_793_427_601, nanos);
+            let iso = format!("2026-10-31T06:20:01.{fraction}Z");
+            let unix = format!("1793427601.{fraction}");
+            assert_eq!(timestamp_prefix_at(Iso, now).unwrap(), format!("{iso} "));
+            assert_eq!(
+                timestamp_prefix_at(Unix, now).unwrap(),
+                format!("[{unix}] ")
+            );
+            assert_eq!(
+                serde_json::to_value(json_timestamp_at(Iso, now).unwrap()).unwrap(),
+                iso
+            );
+            assert_eq!(
+                serde_json::to_value(json_timestamp_at(Unix, now).unwrap()).unwrap(),
+                unix.parse::<f64>().unwrap()
+            );
+        }
+        assert!(timestamp_prefix_at(Iso, UNIX_EPOCH - Duration::from_secs(1)).is_err());
+        assert!(json_timestamp_at(Unix, UNIX_EPOCH - Duration::from_secs(1)).is_err());
     }
 
     #[test]

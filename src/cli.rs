@@ -80,7 +80,7 @@ pub struct Cli {
     #[arg(short = 'q', help_heading = "Ping Options")]
     pub quiet: bool,
 
-    /// Prefix each probe result with its local print time.
+    /// Prefix each probe result with its print time.
     #[arg(short = 'D', help_heading = "Ping Options")]
     pub timestamp: bool,
 
