@@ -175,6 +175,8 @@ On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads IC
 
 TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `status=open`; an RST is reported as `status=closed` and still counts as a received response with its RTT. UDP application replies are `status=reply`; target Port Unreachable errors are `status=port_unreachable`; both count as received. Any HTTP status code counts as a received response; 4xx and 5xx remain visible in the status and response counts. Other outcomes use `status=timeout`, `status=network_error`, or `status=local_error` as appropriate. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
 
+Each TCP probe sends one SYN and never retransmits it, so a single dropped packet shows up as `status=timeout` even when a normal `connect()` would retry and succeed. `status=open` means a SYN-ACK arrived; it does not show that the service behind the port accepted the connection or that the application is healthy. HTTPS probes skip certificate verification, so an expired, self-signed, or name-mismatched certificate produces the same result as a trusted one and cannot be told apart from the output.
+
 Ping JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state. `mdev` is the population standard deviation of RTTs, matching common ping tools.
 
 ### GeoIP Lookup
@@ -231,6 +233,12 @@ Traceroute JSON contains `target_name`, the resolved IP in `target`, `max_hops`,
 - `--json`: Write JSON to stdout. `--json=FILE` writes it to `FILE` instead.
 
 `-D` prints `[seconds.microseconds]` by default. `-D --ts-fmt iso` prints UTC RFC 3339 `YYYY-MM-DDTHH:MM:SS.ffffffZ` with six fractional digits. The timestamp is captured when the result line or JSON summary record is prepared for output. Ping JSON records include a microsecond-precision numeric `timestamp` with `unix` or a UTC RFC 3339 string with `iso`; the field is absent without `-D`. RTT and interval timing are unchanged.
+
+### Exit Status
+
+- `0`: PingX ran to completion. Timeouts, full packet loss, closed ports, and HTTP 4xx/5xx responses all end with `0`, so use the statistics or JSON fields to judge the target. GeoIP lookup prints resolve errors and still exits `0`.
+- `1`: the run could not start or finish, such as missing privileges, a helper or WinDivert failure, an unusable `-I` interface, a lone target whose name cannot be resolved, a probe session error, a JSON file that cannot be written, GeoIP database setup failure, or a traceroute that did not reach the target. When several targets are given, an unusable one prints an error and is skipped.
+- `2`: the command line is invalid. Unknown, conflicting, or unparsable options are rejected by the parser, and `-R` requires exactly one target.
 
 ---
 
@@ -410,6 +418,8 @@ Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错�
 
 TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `status=open`；收到 RST 显示 `status=closed`，仍计为成功响应并记录 RTT。UDP 应用响应为 `status=reply`，目标返回的 Port Unreachable 为 `status=port_unreachable`，两者都计入成功响应。任意 HTTP 状态码都计为收到响应；4xx 和 5xx 仍会体现在状态和响应计数中。其他结果使用 `status=timeout`、`status=network_error` 或 `status=local_error`。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
 
+每次 TCP 探测只发送一个 SYN，后台不会重传，因此一个包丢失就会显示 `status=timeout`，而普通的 `connect()` 可能重传后成功。`status=open` 只表示收到 SYN-ACK，不能证明端口后面的服务已接受连接或应用层健康。HTTPS 探测跳过证书校验，过期、自签名或域名不匹配的证书与可信证书得到相同结果，无法从输出区分。
+
 Ping 的 JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。`mdev` 是 RTT 的总体标准差，与常见 ping 工具一致。
 
 ### GeoIP 位置查询
@@ -466,3 +476,9 @@ pingx -R example.com --json=route.json
 - `--json`: 将 JSON 写到标准输出；`--json=FILE` 改为写入 `FILE`。
 
 `-D` 默认输出 `[秒.微秒]`；`-D --ts-fmt iso` 输出 UTC 的 RFC 3339 时间 `YYYY-MM-DDTHH:MM:SS.ffffffZ`，固定六位小数。时间在准备输出结果行或 JSON 汇总记录时取得。Ping JSON 记录在 `unix` 下包含微秒精度的数值型 `timestamp`，在 `iso` 下包含 UTC 的 RFC 3339 时间字符串；未指定 `-D` 时没有该字段。RTT 和发包间隔不受影响。
+
+### 退出码
+
+- `0`：正常跑完。超时、全部丢包、端口关闭和 HTTP 4xx/5xx 都返回 `0`，目标好坏请看统计或 JSON 字段。GeoIP 查询遇到解析失败时打印错误后仍返回 `0`。
+- `1`：无法开始或无法正常结束，例如缺少权限、helper 或 WinDivert 失败、`-I` 网卡不可用、唯一目标解析失败、探测会话出错、JSON 文件写入失败、GeoIP 数据库准备失败，或路由追踪未到达目标。多目标时，不可用的目标打印错误后跳过。
+- `2`：命令行不合法。未知、冲突或无法解析的选项会被解析器拒绝，`-R` 要求恰好一个目标。
