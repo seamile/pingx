@@ -349,7 +349,10 @@ fn library_path() -> io::Result<PathBuf> {
 }
 
 fn open_error() -> io::Error {
-    let error = io::Error::last_os_error();
+    open_error_for(io::Error::last_os_error())
+}
+
+fn open_error_for(error: io::Error) -> io::Error {
     let message = match error.raw_os_error() {
         Some(2) => "WinDivert driver is unavailable; install WinDivert64.sys next to WinDivert.dll",
         Some(5) => "WinDivert requires Administrator privileges",
@@ -393,5 +396,12 @@ mod tests {
     #[test]
     fn address_matches_the_x64_windivert_abi() {
         assert_eq!(std::mem::size_of::<Address>(), 80);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn administrator_error_is_explained() {
+        let error = open_error_for(io::Error::from_raw_os_error(5));
+        assert!(error.to_string().contains("Administrator privileges"));
     }
 }

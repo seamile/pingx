@@ -173,9 +173,9 @@ On Linux, ICMP and TCP traceroute require `CAP_NET_RAW`; UDP traceroute reads IC
 
 ### Response Semantics
 
-TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `status=open`; an RST is reported as `status=closed` and still counts as a received response with its RTT. UDP application replies are `status=reply`; target Port Unreachable errors are `status=port_unreachable`; both count as received. Other outcomes use `status=timeout`, `status=network_error`, or `status=local_error` as appropriate. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
+TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A SYN-ACK is reported as `status=open`; an RST is reported as `status=closed` and still counts as a received response with its RTT. UDP application replies are `status=reply`; target Port Unreachable errors are `status=port_unreachable`; both count as received. Any HTTP status code counts as a received response; 4xx and 5xx remain visible in the status and response counts. Other outcomes use `status=timeout`, `status=network_error`, or `status=local_error` as appropriate. A timeout means no usable response was observed and does not prove that the host is offline. Other ICMP errors identify the responding node and reason but do not contribute a target RTT.
 
-Ping JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state.
+Ping JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state. `mdev` is the population standard deviation of RTTs, matching common ping tools.
 
 ### GeoIP Lookup
 
@@ -408,9 +408,9 @@ Linux 的 ICMP/TCP 路由追踪需要 `CAP_NET_RAW`；UDP 路径从 socket 错�
 
 ### 响应语义
 
-TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `status=open`；收到 RST 显示 `status=closed`，仍计为成功响应并记录 RTT。UDP 应用响应为 `status=reply`，目标返回的 Port Unreachable 为 `status=port_unreachable`，两者都计入成功响应。其他结果使用 `status=timeout`、`status=network_error` 或 `status=local_error`。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
+TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-ACK 显示 `status=open`；收到 RST 显示 `status=closed`，仍计为成功响应并记录 RTT。UDP 应用响应为 `status=reply`，目标返回的 Port Unreachable 为 `status=port_unreachable`，两者都计入成功响应。任意 HTTP 状态码都计为收到响应；4xx 和 5xx 仍会体现在状态和响应计数中。其他结果使用 `status=timeout`、`status=network_error` 或 `status=local_error`。超时表示没有观察到可用响应，不能据此判定主机离线；其他 ICMP 错误会显示响应节点和原因，但不计入目标 RTT。
 
-Ping 的 JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。
+Ping 的 JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。`mdev` 是 RTT 的总体标准差，与常见 ping 工具一致。
 
 ### GeoIP 位置查询
 

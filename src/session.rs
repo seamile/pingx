@@ -4,7 +4,7 @@ use crate::utils::{IpVersion, resolve_host};
 use anyhow::Result;
 use colored::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal;
 
@@ -95,7 +95,6 @@ mod models {
             if !self.settled_sequences.insert(result.seq) {
                 return false;
             }
-            self.transmitted += 1;
             match &result.status {
                 ProbeStatus::Success(kind) => {
                     self.received += 1;
@@ -107,6 +106,41 @@ mod models {
                 ProbeStatus::Timeout => {}
             }
             true
+        }
+
+        pub fn record_sent(&mut self) {
+            self.transmitted += 1;
+        }
+
+        pub fn rtt_metrics(&self) -> Option<(f64, f64, f64, f64, f64)> {
+            if self.rtts.is_empty() {
+                return None;
+            }
+
+            let count = self.rtts.len() as f64;
+            let min = self.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
+            let max = self.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
+            let avg_seconds = self.rtts.iter().map(Duration::as_secs_f64).sum::<f64>() / count;
+            let mdev = (self
+                .rtts
+                .iter()
+                .map(|rtt| (rtt.as_secs_f64() - avg_seconds).powi(2))
+                .sum::<f64>()
+                / count)
+                .sqrt()
+                * 1000.0;
+            let jitter = if self.rtts.len() > 1 {
+                self.rtts
+                    .windows(2)
+                    .map(|pair| (pair[1].as_secs_f64() - pair[0].as_secs_f64()).abs())
+                    .sum::<f64>()
+                    / (self.rtts.len() - 1) as f64
+                    * 1000.0
+            } else {
+                0.0
+            };
+
+            Some((min, max, avg_seconds * 1000.0, mdev, jitter))
         }
     }
 }
@@ -163,7 +197,7 @@ impl Session {
     }
 
     async fn run_impl(&self, show_headers: bool) -> Result<()> {
-        let targets = &self.cli.targets;
+        let targets = unique_targets(&self.cli.targets);
         let multi_target = targets.len() > 1;
         let quiet = self.cli.quiet;
         let json_stdout = matches!(self.cli.json.as_ref(), Some(None));
@@ -175,6 +209,7 @@ impl Session {
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
+        let mut pinger_targets = Vec::new();
 
         #[cfg(unix)]
         let mut client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
@@ -185,7 +220,7 @@ impl Session {
         #[cfg(not(unix))]
         let client_v6: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
 
-        for target_string in targets {
+        for &target_string in &targets {
             // Detect protocol and host
             let (protocol, host_to_resolve) =
                 match crate::utils::detect_protocol(&self.cli, target_string) {
@@ -199,7 +234,7 @@ impl Session {
                     }
                 };
 
-            target_protocols.insert(target_string.clone(), protocol.clone());
+            target_protocols.insert(target_string.to_string(), protocol.clone());
 
             let ip_version = if self.cli.ipv4 {
                 IpVersion::V4
@@ -254,8 +289,8 @@ impl Session {
                     }
 
                     all_stats.insert(
-                        target_string.clone(),
-                        models::PingStats::new(target_string.clone(), target_addr),
+                        target_string.to_string(),
+                        models::PingStats::new(target_string.to_string(), target_addr),
                     );
 
                     if show_headers && !json_stdout {
@@ -275,7 +310,7 @@ impl Session {
                     };
 
                     let mut pinger = crate::pinger::create_pinger(
-                        target_string.clone(),
+                        target_string.to_string(),
                         protocol,
                         target_addr,
                         config,
@@ -288,6 +323,7 @@ impl Session {
                         continue;
                     }
                     pingers.push(pinger);
+                    pinger_targets.push(target_string.to_string());
                 }
                 Err(e) => {
                     eprintln!("pingx: {}: {}", target_string, e);
@@ -338,10 +374,13 @@ impl Session {
                             continue;
                     }
 
-                    for pinger in &pingers {
+                    for (target, pinger) in pinger_targets.iter().zip(&pingers) {
                         if let Err(e) = pinger.ping(seq).await {
                             eprintln!("Failed to ping: {}", e);
                         } else {
+                            if let Some(stats) = all_stats.get_mut(target) {
+                                stats.record_sent();
+                            }
                             inflight_packets += 1;
                         }
                     }
@@ -385,7 +424,7 @@ impl Session {
         if let Some(json_arg) = &self.cli.json {
             let mut json_results = Vec::new();
 
-            for target_host in targets {
+            for &target_host in &targets {
                 if let Some(stats) = all_stats.get(target_host) {
                     let protocol = target_protocols
                         .get(target_host)
@@ -400,43 +439,21 @@ impl Session {
                     };
                     let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
 
-                    let (min, max, avg, mdev, jitter) = if stats.received > 0 {
-                        let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
-                        let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-                        let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0
-                            / stats.rtts.len() as f64;
-
-                        let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-                        let sum_sq_diff: f64 = stats
-                            .rtts
-                            .iter()
-                            .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
-                            .sum();
-                        let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
-
-                        let jitter = if stats.rtts.len() > 1 {
-                            let sum_diff: f64 = stats
-                                .rtts
-                                .windows(2)
-                                .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
-                                .sum();
-                            sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
-                        } else {
-                            0.0
-                        };
-                        (
-                            (min * 1000.0).round() / 1000.0,
-                            (max * 1000.0).round() / 1000.0,
-                            (avg * 1000.0).round() / 1000.0,
-                            (mdev * 1000.0).round() / 1000.0,
-                            (jitter * 1000.0).round() / 1000.0,
-                        )
-                    } else {
-                        (0.0, 0.0, 0.0, 0.0, 0.0)
-                    };
+                    let (min, max, avg, mdev, jitter) = stats
+                        .rtt_metrics()
+                        .map(|(min, max, avg, mdev, jitter)| {
+                            (
+                                (min * 1000.0).round() / 1000.0,
+                                (max * 1000.0).round() / 1000.0,
+                                (avg * 1000.0).round() / 1000.0,
+                                (mdev * 1000.0).round() / 1000.0,
+                                (jitter * 1000.0).round() / 1000.0,
+                            )
+                        })
+                        .unwrap_or_default();
 
                     json_results.push(JsonResult {
-                        target: target_host.clone(),
+                        target: target_host.to_string(),
                         protocol: protocol_str,
                         target_port: protocol.port(),
                         ip: stats._address.to_string(),
@@ -487,7 +504,7 @@ impl Session {
         let mut global_key_widths = [0usize; 3];
         let mut global_val_widths = [0usize; 3];
 
-        for target_host in targets {
+        for &target_host in &targets {
             if let Some(stats) = all_stats.get(target_host) {
                 let table = Self::prepare_table_data(stats);
                 for r in 0..3 {
@@ -498,7 +515,7 @@ impl Session {
                             std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
                     }
                 }
-                tables.push((target_host.clone(), table));
+                tables.push((target_host.to_string(), table));
             }
         }
 
@@ -647,47 +664,18 @@ impl Session {
 
         let total_time = stats.start_time.elapsed().as_millis();
 
-        let (min, max, avg, mdev, jitter) = if stats.received > 0 {
-            let min = stats.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
-            let max = stats.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-            let avg = stats.rtts.iter().sum::<Duration>().as_secs_f64() * 1000.0
-                / stats.rtts.len() as f64;
-
-            let avg_duration = Duration::from_secs_f64(avg / 1000.0);
-            let sum_sq_diff: f64 = stats
-                .rtts
-                .iter()
-                .map(|rtt| (rtt.as_secs_f64() - avg_duration.as_secs_f64()).abs())
-                .sum();
-            let mdev = sum_sq_diff / stats.rtts.len() as f64 * 1000.0;
-
-            let jitter = if stats.rtts.len() > 1 {
-                let sum_diff: f64 = stats
-                    .rtts
-                    .windows(2)
-                    .map(|w| (w[1].as_secs_f64() - w[0].as_secs_f64()).abs())
-                    .sum();
-                sum_diff / (stats.rtts.len() - 1) as f64 * 1000.0
-            } else {
-                0.0
-            };
-
-            (
-                format!("{:.3} ms", min),
-                format!("{:.3} ms", max),
-                format!("{:.3} ms", avg),
-                format!("{:.3} ms", mdev),
-                format!("{:.3} ms", jitter),
-            )
-        } else {
-            (
-                String::from("-"),
-                String::from("-"),
-                String::from("-"),
-                String::from("-"),
-                String::from("-"),
-            )
-        };
+        let (min, max, avg, mdev, jitter) = stats
+            .rtt_metrics()
+            .map(|(min, max, avg, mdev, jitter)| {
+                (
+                    format!("{min:.3} ms"),
+                    format!("{max:.3} ms"),
+                    format!("{avg:.3} ms"),
+                    format!("{mdev:.3} ms"),
+                    format!("{jitter:.3} ms"),
+                )
+            })
+            .unwrap_or_else(|| ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()));
 
         TableData {
             rows: [
@@ -806,6 +794,15 @@ struct Cell {
 
 struct TableData {
     rows: [[Cell; 3]; 3],
+}
+
+fn unique_targets(targets: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    targets
+        .iter()
+        .map(String::as_str)
+        .filter(|target| seen.insert(*target))
+        .collect()
 }
 
 fn timestamp_prefix_at(format: crate::cli::TimestampFormat, now: SystemTime) -> Result<String> {
@@ -964,6 +961,7 @@ mod tests {
             models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
         // Add samples: 10ms, 20ms, 30ms
+        stats.record_sent();
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -973,6 +971,7 @@ mod tests {
             rtt: Duration::from_millis(10),
             status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
+        stats.record_sent();
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -982,6 +981,7 @@ mod tests {
             rtt: Duration::from_millis(20),
             status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
+        stats.record_sent();
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -1013,8 +1013,8 @@ mod tests {
         // Avg: 20
         assert_eq!(get_val("avg:"), "20.000 ms");
 
-        // Mdev: (|10-20| + |20-20| + |30-20|) / 3 = (10 + 0 + 10) / 3 = 6.666...
-        assert_eq!(get_val("mdev:"), "6.667 ms");
+        // Mdev: sqrt(((10-20)^2 + (20-20)^2 + (30-20)^2) / 3) = 8.164...
+        assert_eq!(get_val("mdev:"), "8.165 ms");
 
         // Jitter: (|20-10| + |30-20|) / 2 = (10 + 10) / 2 = 10
         assert_eq!(get_val("jitter:"), "10.000 ms");
@@ -1057,6 +1057,7 @@ mod tests {
             status: models::ProbeStatus::Success(models::ResponseType::TcpOpen),
         };
 
+        stats.record_sent();
         assert!(stats.update(&result));
         assert!(!stats.update(&result));
 
@@ -1064,6 +1065,16 @@ mod tests {
         assert_eq!(stats.received, 1);
         assert_eq!(stats.response_counts[&models::ResponseType::TcpOpen], 1);
         assert_eq!(stats.rtts, [Duration::from_millis(10)]);
+    }
+
+    #[test]
+    fn sent_probes_without_results_still_count_as_transmitted() {
+        let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        stats.record_sent();
+
+        assert_eq!(stats.transmitted, 1);
+        assert_eq!(stats.received, 0);
     }
 
     #[test]
@@ -1083,19 +1094,24 @@ mod tests {
             status,
         };
 
+        stats.record_sent();
         stats.update(&result(
             1,
             models::ProbeStatus::Success(models::ResponseType::TcpClosed),
         ));
+        stats.record_sent();
         stats.update(&result(
             2,
             models::ProbeStatus::Success(models::ResponseType::UdpPortUnreachable),
         ));
+        stats.record_sent();
         stats.update(&result(3, models::ProbeStatus::Timeout));
+        stats.record_sent();
         stats.update(&result(
             4,
             models::ProbeStatus::LocalError("send failed".to_string()),
         ));
+        stats.record_sent();
         stats.update(&result(
             5,
             models::ProbeStatus::NetworkError {
@@ -1113,5 +1129,19 @@ mod tests {
         );
         assert_eq!(stats.local_failures, 1);
         assert_eq!(stats.network_errors, 1);
+    }
+
+    #[test]
+    fn duplicate_targets_are_removed_in_input_order() {
+        let targets = vec![
+            "first.example".to_string(),
+            "second.example".to_string(),
+            "first.example".to_string(),
+        ];
+
+        assert_eq!(
+            unique_targets(&targets),
+            ["first.example", "second.example"]
+        );
     }
 }

@@ -54,27 +54,14 @@ Helper Commands (macOS):
   pingx helper uninstall    Remove the privileged helper
 
 Notes:
-  Without -T, -U, or -H, the target format selects the protocol:
-  HOST uses ICMP, HOST:PORT uses TCP, and an HTTP URL uses HTTP.
-
-  For HOST and HOST:PORT targets, -T or -U overrides auto-detection:
-  HOST:PORT uses TCP with -T and UDP with -U. Omitted ports default to
-  80 or 33434, respectively.
-  Traceroute follows the same rules: -R HOST is ICMP, -R HOST:PORT is
-  TCP, and -R -U HOST:PORT uses UDP.
-
-  -T, -U, and -H are mutually exclusive; -4 and -6 are mutually exclusive.
-  unix prints [seconds.microseconds]; iso prints UTC RFC 3339: YYYY-MM-DDTHH:MM:SS.ffffffZ.
-  --ts-fmt requires -D. Timestamps apply to per-probe and Ping JSON results.
-  --json writes to stdout; --json=FILE writes to FILE.
-  Traceroute does not support HTTP or GeoIP mode.
-  In traceroute mode, -c, -i, -w, -t, -q, and --header are ignored.
-  Traceroute JSON is emitted only after the target is reached.
-
-  TCP probes are half-open: SYN-ACK indicates open; RST indicates closed.
-  Closed TCP ports and UDP port-unreachable replies count as received responses.
-  TCP Ping ignores -s; TCP traceroute requires 40 bytes for IPv4 or 60 for IPv6.
-
-  macOS offers to install or update the privileged helper when needed.
-  Windows UDP/TCP Ping and traceroute require Administrator access,
-  with WinDivert.dll and WinDivert64.sys beside pingx.exe.
+  • Auto mode: HOST uses ICMP, HOST:PORT uses TCP, and HTTP URLs use HTTP.
+    -T or -U overrides host targets; traceroute follows the same rules.
+  • -T, -U, and -H are mutually exclusive; so are -4 and -6.
+  • --ts-fmt requires -D: unix uses [seconds.microseconds], iso uses UTC RFC 3339.
+  • Traceroute rejects HTTP/GeoIP modes and ignores -c, -i, -w, -t, -q, and --header.
+    JSON is emitted only after the target is reached.
+  • Closed TCP ports and UDP port-unreachable replies count as received responses.
+  • TCP Ping ignores -s; TCP traceroute requires 40 bytes (IPv4) or 60 (IPv6).
+  • macOS offers to install or update the privileged helper when needed.
+  • Windows UDP/TCP Ping and traceroute require Administrator access,
+    with WinDivert.dll and WinDivert64.sys beside pingx.exe.

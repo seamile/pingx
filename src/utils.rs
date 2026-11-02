@@ -176,13 +176,26 @@ async fn connect_tcp_bound(addr: SocketAddr, iface: &str) -> io::Result<TcpStrea
     let sockaddr: SockAddr = addr.into();
     match socket.connect(&sockaddr) {
         Ok(()) => {}
-        Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(ref error) if is_connect_pending(error) => {}
         Err(error) => return Err(error),
     }
     let stream: std::net::TcpStream = socket.into();
     let stream = TcpStream::from_std(stream)?;
+    finish_tcp_connect(stream).await
+}
+
+#[cfg(unix)]
+async fn finish_tcp_connect(stream: TcpStream) -> io::Result<TcpStream> {
     stream.writable().await?;
+    if let Some(error) = stream.take_error()? {
+        return Err(error);
+    }
     Ok(stream)
+}
+
+#[cfg(unix)]
+fn is_connect_pending(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
 #[cfg(not(unix))]
@@ -634,6 +647,82 @@ mod tests {
 
         let res = resolve_host("::1", IpVersion::V4).await;
         assert!(res.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonblocking_tcp_connect_reports_socket_error() {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::Ipv4Addr;
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let error = match socket.connect(&addr.into()) {
+            Ok(()) => panic!("closed local port unexpectedly accepted a connection"),
+            Err(error) if is_connect_pending(&error) => {
+                let stream = TcpStream::from_std(socket.into()).unwrap();
+                finish_tcp_connect(stream).await.unwrap_err()
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn interface_bound_tcp_connect_never_reports_a_refused_connection_as_success() {
+        use std::net::Ipv4Addr;
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let iface = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let error = connect_tcp_bound(addr, iface).await.unwrap_err();
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_protocol_selection_covers_privileged_and_unprivileged_modes() {
+        use clap::Parser;
+
+        let tcp = crate::cli::Cli::try_parse_from(["pingx", "-T", "127.0.0.1:443"]).unwrap();
+        assert_eq!(
+            raw_protocol_for_cli(&tcp).unwrap(),
+            Some(socket2::Protocol::TCP)
+        );
+
+        let http = crate::cli::Cli::try_parse_from(["pingx", "-H", "example.com"]).unwrap();
+        assert_eq!(raw_protocol_for_cli(&http).unwrap(), None);
+
+        let udp = crate::cli::Cli::try_parse_from(["pingx", "-U", "127.0.0.1:33434"]).unwrap();
+        let expected_udp = if cfg!(target_os = "linux") {
+            None
+        } else {
+            Some(socket2::Protocol::ICMPV4)
+        };
+        assert_eq!(raw_protocol_for_cli(&udp).unwrap(), expected_udp);
+
+        let trace_udp =
+            crate::cli::Cli::try_parse_from(["pingx", "-R", "-U", "example.com"]).unwrap();
+        assert_eq!(raw_protocol_for_cli(&trace_udp).unwrap(), expected_udp);
     }
 
     #[cfg(unix)]
