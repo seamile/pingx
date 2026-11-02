@@ -500,6 +500,8 @@ impl Session {
         }
 
         // Collect table data and calculate global column widths
+        let geo = crate::geoip::GeoIpManager::new().ok();
+        let geo_missing = geo.as_ref().is_none_or(|g| !g.has_databases());
         let mut tables = Vec::new();
         let mut global_key_widths = [0usize; 3];
         let mut global_val_widths = [0usize; 3];
@@ -515,13 +517,24 @@ impl Session {
                             std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
                     }
                 }
-                tables.push((target_host.to_string(), table));
+                let country = geo.as_ref().and_then(|g| g.country_code(stats._address));
+                tables.push((target_host.to_string(), country, table));
             }
         }
 
         // Print all tables with global widths
-        for (target, table) in tables {
-            Self::render_table(&target, &table, &global_key_widths, &global_val_widths);
+        for (target, country, table) in tables {
+            Self::render_table(
+                &target,
+                country.as_deref(),
+                &table,
+                &global_key_widths,
+                &global_val_widths,
+            );
+        }
+
+        if geo_missing {
+            println!("\n{}", crate::geoip::missing_database_note());
         }
 
         Ok(())
@@ -725,15 +738,29 @@ impl Session {
         }
     }
 
-    fn render_table(target: &str, table: &TableData, k_widths: &[usize; 3], v_widths: &[usize; 3]) {
+    fn styled_label(target: &str, country: Option<&str>) -> String {
+        match country {
+            Some(code) => format!("[{}] {}", code, target),
+            None => target.to_string(),
+        }
+    }
+
+    fn render_table(
+        target: &str,
+        country: Option<&str>,
+        table: &TableData,
+        k_widths: &[usize; 3],
+        v_widths: &[usize; 3],
+    ) {
         let sep = " | ";
+        let label = Self::styled_label(target, country);
 
         // Calculate total width for centering title
         // Each column is k_width + 1 (space) + v_width
         let col_widths: Vec<usize> = (0..3).map(|i| k_widths[i] + 1 + v_widths[i]).collect();
         let total_width = col_widths.iter().sum::<usize>() + (sep.len() * 2);
 
-        let title_clean = format!("=== {} ping statistics ===", target);
+        let title_clean = format!("=== {} ping statistics ===", label);
         let padding = if total_width > title_clean.len() {
             (total_width - title_clean.len()) / 2
         } else {
@@ -743,7 +770,7 @@ impl Session {
         println!(
             "\n{:padding$}{}",
             "",
-            format!("=== {} ping statistics ===", target.bold()).blue(),
+            format!("=== {} ping statistics ===", label.as_str().bold()).blue(),
             padding = padding
         );
 
@@ -856,6 +883,12 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+
+    #[test]
+    fn report_title_prefixes_country_code() {
+        assert_eq!(Session::styled_label("1.1.1.1", Some("US")), "[US] 1.1.1.1");
+        assert_eq!(Session::styled_label("223.5.5.5", None), "223.5.5.5");
+    }
 
     #[test]
     fn json_file_write_errors_are_returned() {

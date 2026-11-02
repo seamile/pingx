@@ -685,7 +685,7 @@ mod platform {
 
     fn styled_trace_header(name: &str, ip: IpAddr, max_hops: u8, size: usize) -> String {
         format!(
-            "{} {}   {} {:>3}    {} {} b",
+            "{} {}   {} {:>3}    {} {} b\n",
             "Target:".bold(),
             display_target(name, ip),
             "Max Hops:".bold(),
@@ -2151,12 +2151,14 @@ mod platform {
                 None
             }
         };
-        if geo.as_ref().is_none_or(|geo| !geo.has_databases()) {
-            eprintln!(
-                "pingx: GeoIP database is unavailable; locations are shown as '-'. Run `pingx --fetch-geo` to configure it."
-            );
+        let geo_missing = geo.as_ref().is_none_or(|geo| !geo.has_databases());
+        let mut output = render_rows(rows, geo.as_ref());
+        if geo_missing {
+            output.push('\n');
+            output.push('\n');
+            output.push_str(&crate::geoip::missing_database_note());
         }
-        println!("{}", render_rows(rows, geo.as_ref()));
+        println!("{}", output);
     }
 
     #[cfg(target_os = "macos")]
@@ -2170,16 +2172,18 @@ mod platform {
                 None
             }
         };
-        if geo.as_ref().is_none_or(|geo| !geo.has_databases()) {
-            eprintln!(
-                "pingx: GeoIP database is unavailable; locations are shown as '-'. Run `pingx --fetch-geo` to configure it."
-            );
-        }
-        Ok(format!(
+        let geo_missing = geo.as_ref().is_none_or(|geo| !geo.has_databases());
+        let mut output = format!(
             "{}\n{}",
             styled_trace_header(&data.target_name, data.target, data.max_hops, data.size),
             render_rows(&rows, geo.as_ref())
-        ))
+        );
+        if geo_missing {
+            output.push('\n');
+            output.push('\n');
+            output.push_str(&crate::geoip::missing_database_note());
+        }
+        Ok(output)
     }
 
     fn render_rows(rows: &[Row], geo: Option<&GeoIpManager>) -> String {
@@ -3571,7 +3575,7 @@ mod platform {
                     64,
                     40,
                 )),
-                "Target: demo.example (127.0.0.1)   Max Hops:  64    Size: 40 b"
+                "Target: demo.example (127.0.0.1)   Max Hops:  64    Size: 40 b\n"
             );
         }
 

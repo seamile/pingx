@@ -261,6 +261,33 @@ impl GeoIpManager {
     }
 }
 
+impl GeoIpManager {
+    /// Two-letter ISO 3166 country code (e.g. CN) for an IP, using the existing
+    /// database only. Returns None when no database or code is available.
+    pub fn country_code(&self, ip: IpAddr) -> Option<String> {
+        let record = match ip {
+            IpAddr::V4(_) => self.db_v4.as_ref()?.ip_lookup(ip).ok()?,
+            IpAddr::V6(_) => self.db_v6.as_ref()?.ip_lookup(ip).ok()?,
+        };
+
+        match record {
+            Record::LocationDb(r) => r
+                .country
+                .map(|c| c.short_name.trim().to_string())
+                .filter(|code| !code.is_empty() && code != "-"),
+            _ => None,
+        }
+    }
+}
+
+pub fn missing_database_note() -> String {
+    format!(
+        "{}\n{}",
+        "Note:".bold().underline().yellow(),
+        "GeoIP database is unavailable; IP location info is omitted.\nRun `pingx --fetch-geo` to download the database and show locations."
+    )
+}
+
 #[derive(Serialize)]
 pub struct GeoRecord {
     pub ip: IpAddr,
@@ -397,6 +424,14 @@ pub fn print_geo_table(records: &[GeoRecord]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_database_note_has_heading() {
+        let note = missing_database_note();
+        assert_eq!(note.lines().count(), 3);
+        assert!(note.contains("Note:"));
+        assert!(note.contains("--fetch-geo"));
+    }
 
     #[test]
     fn test_geo_ip_manager_new_no_db() {
