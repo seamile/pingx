@@ -68,11 +68,19 @@ mod models {
         pub transmitted: u64,
         pub received: u64,
         pub start_time: Instant,
-        pub rtts: Vec<Duration>,
         pub response_counts: BTreeMap<ResponseType, u64>,
         pub local_failures: u64,
         pub network_errors: u64,
-        settled_sequences: BTreeSet<u64>,
+        rtt_count: u64,
+        rtt_min: Option<Duration>,
+        rtt_max: Option<Duration>,
+        rtt_mean_secs: f64,
+        rtt_m2_secs: f64,
+        last_rtt_secs: Option<f64>,
+        jitter_sum_secs: f64,
+        jitter_count: u64,
+        // Registered on send, removed on settle: bounded by outstanding probes, not total sent.
+        pending_sequences: BTreeSet<u64>,
     }
 
     impl PingStats {
@@ -83,22 +91,29 @@ mod models {
                 transmitted: 0,
                 received: 0,
                 start_time: Instant::now(),
-                rtts: Vec::new(),
                 response_counts: BTreeMap::new(),
                 local_failures: 0,
                 network_errors: 0,
-                settled_sequences: BTreeSet::new(),
+                rtt_count: 0,
+                rtt_min: None,
+                rtt_max: None,
+                rtt_mean_secs: 0.0,
+                rtt_m2_secs: 0.0,
+                last_rtt_secs: None,
+                jitter_sum_secs: 0.0,
+                jitter_count: 0,
+                pending_sequences: BTreeSet::new(),
             }
         }
 
         pub fn update(&mut self, result: &PingResult) -> bool {
-            if !self.settled_sequences.insert(result.seq) {
+            if !self.pending_sequences.remove(&result.seq) {
                 return false;
             }
             match &result.status {
                 ProbeStatus::Success(kind) => {
                     self.received += 1;
-                    self.rtts.push(result.rtt);
+                    self.add_rtt(result.rtt);
                     *self.response_counts.entry(*kind).or_default() += 1;
                 }
                 ProbeStatus::LocalError(_) => self.local_failures += 1,
@@ -108,39 +123,43 @@ mod models {
             true
         }
 
-        pub fn record_sent(&mut self) {
+        pub fn record_sent(&mut self, seq: u64) {
             self.transmitted += 1;
+            self.pending_sequences.insert(seq);
+        }
+
+        fn add_rtt(&mut self, rtt: Duration) {
+            let secs = rtt.as_secs_f64();
+            self.rtt_min = Some(self.rtt_min.map_or(rtt, |m| m.min(rtt)));
+            self.rtt_max = Some(self.rtt_max.map_or(rtt, |m| m.max(rtt)));
+            // Welford online mean and M2; M2/n equals the old two-pass population variance.
+            self.rtt_count += 1;
+            let delta = secs - self.rtt_mean_secs;
+            self.rtt_mean_secs += delta / self.rtt_count as f64;
+            self.rtt_m2_secs += delta * (secs - self.rtt_mean_secs);
+            if let Some(prev) = self.last_rtt_secs {
+                self.jitter_sum_secs += (secs - prev).abs();
+                self.jitter_count += 1;
+            }
+            self.last_rtt_secs = Some(secs);
         }
 
         pub fn rtt_metrics(&self) -> Option<(f64, f64, f64, f64, f64)> {
-            if self.rtts.is_empty() {
+            if self.rtt_count == 0 {
                 return None;
             }
 
-            let count = self.rtts.len() as f64;
-            let min = self.rtts.iter().min().unwrap().as_secs_f64() * 1000.0;
-            let max = self.rtts.iter().max().unwrap().as_secs_f64() * 1000.0;
-            let avg_seconds = self.rtts.iter().map(Duration::as_secs_f64).sum::<f64>() / count;
-            let mdev = (self
-                .rtts
-                .iter()
-                .map(|rtt| (rtt.as_secs_f64() - avg_seconds).powi(2))
-                .sum::<f64>()
-                / count)
-                .sqrt()
-                * 1000.0;
-            let jitter = if self.rtts.len() > 1 {
-                self.rtts
-                    .windows(2)
-                    .map(|pair| (pair[1].as_secs_f64() - pair[0].as_secs_f64()).abs())
-                    .sum::<f64>()
-                    / (self.rtts.len() - 1) as f64
-                    * 1000.0
+            let min = self.rtt_min.unwrap().as_secs_f64() * 1000.0;
+            let max = self.rtt_max.unwrap().as_secs_f64() * 1000.0;
+            let avg = self.rtt_mean_secs * 1000.0;
+            let mdev = (self.rtt_m2_secs / self.rtt_count as f64).sqrt() * 1000.0;
+            let jitter = if self.jitter_count > 0 {
+                self.jitter_sum_secs / self.jitter_count as f64 * 1000.0
             } else {
                 0.0
             };
 
-            Some((min, max, avg_seconds * 1000.0, mdev, jitter))
+            Some((min, max, avg, mdev, jitter))
         }
     }
 }
@@ -379,7 +398,7 @@ impl Session {
                             eprintln!("Failed to ping: {}", e);
                         } else {
                             if let Some(stats) = all_stats.get_mut(target) {
-                                stats.record_sent();
+                                stats.record_sent(seq);
                             }
                             inflight_packets += 1;
                         }
@@ -994,7 +1013,7 @@ mod tests {
             models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
         // Add samples: 10ms, 20ms, 30ms
-        stats.record_sent();
+        stats.record_sent(1);
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -1004,7 +1023,7 @@ mod tests {
             rtt: Duration::from_millis(10),
             status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
-        stats.record_sent();
+        stats.record_sent(2);
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -1014,7 +1033,7 @@ mod tests {
             rtt: Duration::from_millis(20),
             status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
         });
-        stats.record_sent();
+        stats.record_sent(3);
         stats.update(&models::PingResult {
             target: "test".to_string(),
             target_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -1090,21 +1109,63 @@ mod tests {
             status: models::ProbeStatus::Success(models::ResponseType::TcpOpen),
         };
 
-        stats.record_sent();
+        stats.record_sent(1);
         assert!(stats.update(&result));
         assert!(!stats.update(&result));
 
         assert_eq!(stats.transmitted, 1);
         assert_eq!(stats.received, 1);
         assert_eq!(stats.response_counts[&models::ResponseType::TcpOpen], 1);
-        assert_eq!(stats.rtts, [Duration::from_millis(10)]);
+        let (min, max, _, _, _) = stats.rtt_metrics().unwrap();
+        assert!((min - 10.0).abs() < 1e-9);
+        assert!((max - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn results_without_matching_send_are_not_settled() {
+        let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let result = models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            seq: 9,
+            bytes: 0,
+            ttl: None,
+            rtt: Duration::from_millis(5),
+            status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
+        };
+
+        assert!(!stats.update(&result));
+        assert_eq!(stats.received, 0);
+        assert!(stats.rtt_metrics().is_none());
+    }
+
+    #[test]
+    fn late_duplicates_after_out_of_order_settle_are_rejected() {
+        let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let result = |seq| models::PingResult {
+            target: "test".to_string(),
+            target_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            seq,
+            bytes: 0,
+            ttl: None,
+            rtt: Duration::from_millis(seq),
+            status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
+        };
+
+        stats.record_sent(1);
+        stats.record_sent(2);
+        assert!(stats.update(&result(2)));
+        assert!(stats.update(&result(1)));
+        assert!(!stats.update(&result(1)));
+        assert!(!stats.update(&result(2)));
+        assert_eq!(stats.received, 2);
     }
 
     #[test]
     fn sent_probes_without_results_still_count_as_transmitted() {
         let mut stats = models::PingStats::new("test".to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST));
 
-        stats.record_sent();
+        stats.record_sent(1);
 
         assert_eq!(stats.transmitted, 1);
         assert_eq!(stats.received, 0);
@@ -1127,24 +1188,24 @@ mod tests {
             status,
         };
 
-        stats.record_sent();
+        stats.record_sent(1);
         stats.update(&result(
             1,
             models::ProbeStatus::Success(models::ResponseType::TcpClosed),
         ));
-        stats.record_sent();
+        stats.record_sent(2);
         stats.update(&result(
             2,
             models::ProbeStatus::Success(models::ResponseType::UdpPortUnreachable),
         ));
-        stats.record_sent();
+        stats.record_sent(3);
         stats.update(&result(3, models::ProbeStatus::Timeout));
-        stats.record_sent();
+        stats.record_sent(4);
         stats.update(&result(
             4,
             models::ProbeStatus::LocalError("send failed".to_string()),
         ));
-        stats.record_sent();
+        stats.record_sent(5);
         stats.update(&result(
             5,
             models::ProbeStatus::NetworkError {
