@@ -7,18 +7,14 @@ pub mod udp;
 use crate::cli::Protocol;
 use crate::pinger::icmp::IcmpClient;
 use crate::session::PingResult;
-use anyhow::Result;
 use async_trait::async_trait;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
 
 #[async_trait]
 pub trait Pinger: Send + Sync {
-    async fn start(&mut self, tx: Sender<PingResult>) -> Result<()>;
-    async fn ping(&self, seq: u64) -> Result<()>;
-    async fn stop(&mut self) -> Result<()>;
+    async fn probe(&self, seq: u64) -> PingResult;
 }
 
 pub struct PingerConfig {
@@ -35,7 +31,7 @@ pub fn create_pinger(
     config: PingerConfig,
     client_v4: Option<Arc<IcmpClient>>,
     client_v6: Option<Arc<IcmpClient>>,
-) -> Box<dyn Pinger> {
+) -> Arc<dyn Pinger> {
     #[cfg(windows)]
     let _ = (client_v4, client_v6);
     match protocol {
@@ -47,7 +43,7 @@ pub fn create_pinger(
                 } else {
                     client_v4.expect("IPv4 client needed but not provided")
                 };
-                Box::new(icmp::IcmpPinger::new(
+                Arc::new(icmp::IcmpPinger::new(
                     target_name,
                     target,
                     config.ttl,
@@ -58,7 +54,7 @@ pub fn create_pinger(
             }
             #[cfg(windows)]
             {
-                Box::new(icmp::windows::IcmpPinger::new(
+                Arc::new(icmp::windows::IcmpPinger::new(
                     target_name,
                     target,
                     config.ttl,
@@ -67,14 +63,14 @@ pub fn create_pinger(
                 ))
             }
         }
-        Protocol::Tcp(port) => Box::new(tcp::TcpPinger::new(
+        Protocol::Tcp(port) => Arc::new(tcp::TcpPinger::new(
             target_name,
             target,
             port,
             config.ttl,
             config.timeout,
         )),
-        Protocol::Udp(port) => Box::new(udp::UdpPinger::new(
+        Protocol::Udp(port) => Arc::new(udp::UdpPinger::new(
             target_name,
             target,
             port,
@@ -86,7 +82,7 @@ pub fn create_pinger(
             use reqwest::Url;
             let url = Url::parse(&url)
                 .unwrap_or_else(|_| Url::parse(&format!("http://{}", url)).unwrap());
-            Box::new(http::HttpPinger::new(
+            Arc::new(http::HttpPinger::new(
                 target_name,
                 url,
                 target,

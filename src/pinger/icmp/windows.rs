@@ -1,12 +1,9 @@
 use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
-use anyhow::Result;
 use async_trait::async_trait;
 use std::mem::{size_of, zeroed};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY_LH, IP_DEST_HOST_UNREACHABLE, IP_DEST_NET_UNREACHABLE,
@@ -24,7 +21,6 @@ pub struct IcmpPinger {
     ttl: u32,
     size: usize,
     timeout: Duration,
-    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl IcmpPinger {
@@ -41,32 +37,21 @@ impl IcmpPinger {
             ttl,
             size,
             timeout,
-            result_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Pinger for IcmpPinger {
-    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
-        *self.result_tx.lock().await = Some(tx);
-        Ok(())
-    }
-
-    async fn ping(&self, seq: u64) -> Result<()> {
-        let Some(tx) = self.result_tx.lock().await.clone() else {
-            return Ok(());
-        };
+    async fn probe(&self, seq: u64) -> PingResult {
         let target_name = self.target_name.clone();
         let target = self.target;
         let ttl = self.ttl;
         let size = self.size;
         let timeout = self.timeout;
-        tokio::spawn(async move {
-            let result = match tokio::task::spawn_blocking(move || {
-                probe_blocking(target, ttl, size, timeout)
-            })
-            .await
+        let result =
+            match tokio::task::spawn_blocking(move || probe_blocking(target, ttl, size, timeout))
+                .await
             {
                 Ok(result) => result,
                 Err(error) => (
@@ -76,23 +61,15 @@ impl Pinger for IcmpPinger {
                     None,
                 ),
             };
-            let _ = tx
-                .send(PingResult {
-                    target: target_name,
-                    target_addr: target,
-                    seq,
-                    bytes: result.2,
-                    ttl: result.3,
-                    rtt: result.1,
-                    status: result.0,
-                })
-                .await;
-        });
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
+        PingResult {
+            target: target_name,
+            target_addr: target,
+            seq,
+            bytes: result.2,
+            ttl: result.3,
+            rtt: result.1,
+            status: result.0,
+        }
     }
 }
 

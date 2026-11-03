@@ -2,13 +2,11 @@ use crate::pinger::Pinger;
 use crate::pinger::icmp::client::IcmpClient;
 use crate::pinger::icmp_packet::IcmpPacket;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
-use anyhow::Result;
 use async_trait::async_trait;
 use socket2::Type;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
 
 pub struct IcmpPinger {
     target_name: String,
@@ -17,7 +15,6 @@ pub struct IcmpPinger {
     size: usize,
     timeout: Duration,
     client: Arc<IcmpClient>,
-    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl IcmpPinger {
@@ -37,27 +34,35 @@ impl IcmpPinger {
             size,
             timeout,
             client,
-            result_tx: Arc::new(Mutex::new(None)),
         }
     }
+}
 
-    async fn send_result(&self, res: PingResult) {
-        let guard = self.result_tx.lock().await;
-        if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(res).await;
+struct ReplyRegistration {
+    client: Arc<IcmpClient>,
+    target: IpAddr,
+    ident: Option<u16>,
+    seq: u16,
+    armed: bool,
+}
+
+impl ReplyRegistration {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReplyRegistration {
+    fn drop(&mut self) {
+        if self.armed {
+            self.client.unregister(self.target, self.ident, self.seq);
         }
     }
 }
 
 #[async_trait]
 impl Pinger for IcmpPinger {
-    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
-        let mut guard = self.result_tx.lock().await;
-        *guard = Some(tx);
-        Ok(())
-    }
-
-    async fn ping(&self, seq: u64) -> Result<()> {
+    async fn probe(&self, seq: u64) -> PingResult {
         let seq_u16 = seq as u16;
         let payload = vec![0u8; self.size];
 
@@ -70,6 +75,13 @@ impl Pinger for IcmpPinger {
         };
 
         let rx = self.client.register(self.target, ident_key, seq_u16);
+        let mut registration = ReplyRegistration {
+            client: self.client.clone(),
+            target: self.target,
+            ident: ident_key,
+            seq: seq_u16,
+            armed: true,
+        };
 
         let packet = IcmpPacket::new_request(self.target.is_ipv6(), ident_hint, seq_u16, payload);
         let encoded = packet.encode();
@@ -77,7 +89,8 @@ impl Pinger for IcmpPinger {
 
         if let Err(e) = self.client.get_socket().send_to(&encoded, &sock_addr).await {
             self.client.unregister(self.target, ident_key, seq_u16);
-            self.send_result(PingResult {
+            registration.disarm();
+            return PingResult {
                 target: self.target_name.clone(),
                 target_addr: self.target,
                 seq,
@@ -85,78 +98,44 @@ impl Pinger for IcmpPinger {
                 ttl: None,
                 rtt: Duration::ZERO,
                 status: ProbeStatus::LocalError(e.to_string()),
-            })
-            .await;
-            return Ok(());
+            };
         }
 
         let start = std::time::Instant::now();
-        let timeout = self.timeout;
-        let target_name = self.target_name.clone();
-        let target_addr = self.target;
-        let size = self.size;
-        let result_tx = self.result_tx.clone();
-        let client = self.client.clone();
-
-        tokio::spawn(async move {
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(reply)) => {
-                    let rtt = reply.timestamp.duration_since(start);
-                    let guard = result_tx.lock().await;
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx
-                            .send(PingResult {
-                                target: target_name,
-                                target_addr,
-                                seq,
-                                bytes: size,
-                                ttl: reply.ttl,
-                                rtt,
-                                status: ProbeStatus::Success(ResponseType::IcmpEchoReply),
-                            })
-                            .await;
-                    }
-                }
-                Ok(Err(_)) => {
-                    let guard = result_tx.lock().await;
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx
-                            .send(PingResult {
-                                target: target_name,
-                                target_addr,
-                                seq,
-                                bytes: 0,
-                                ttl: None,
-                                rtt: Duration::ZERO,
-                                status: ProbeStatus::LocalError("receiver closed".into()),
-                            })
-                            .await;
-                    }
-                }
-                Err(_) => {
-                    client.unregister(target_addr, ident_key, seq_u16);
-                    let guard = result_tx.lock().await;
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx
-                            .send(PingResult {
-                                target: target_name,
-                                target_addr,
-                                seq,
-                                bytes: 0,
-                                ttl: None,
-                                rtt: Duration::ZERO,
-                                status: ProbeStatus::Timeout,
-                            })
-                            .await;
-                    }
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(reply)) => {
+                registration.disarm();
+                PingResult {
+                    target: self.target_name.clone(),
+                    target_addr: self.target,
+                    seq,
+                    bytes: self.size,
+                    ttl: reply.ttl,
+                    rtt: reply.timestamp.duration_since(start),
+                    status: ProbeStatus::Success(ResponseType::IcmpEchoReply),
                 }
             }
-        });
-
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
+            Ok(Err(_)) => {
+                registration.disarm();
+                PingResult {
+                    target: self.target_name.clone(),
+                    target_addr: self.target,
+                    seq,
+                    bytes: 0,
+                    ttl: None,
+                    rtt: Duration::ZERO,
+                    status: ProbeStatus::LocalError("receiver closed".into()),
+                }
+            }
+            Err(_) => PingResult {
+                target: self.target_name.clone(),
+                target_addr: self.target,
+                seq,
+                bytes: 0,
+                ttl: None,
+                rtt: Duration::ZERO,
+                status: ProbeStatus::Timeout,
+            },
+        }
     }
 }

@@ -145,3 +145,24 @@ async fn duplicate_targets_produce_one_json_result() {
     assert_eq!(json["sent"].as_u64(), Some(1));
     assert_eq!(json["received"].as_u64(), Some(1));
 }
+
+#[tokio::test]
+async fn count_is_applied_per_target_when_targets_exceed_probe_limit() {
+    let addr = responding_http_server(200).await;
+    let mut command = ping_command();
+    command.args(["-c", "1"]);
+    for index in 0..70 {
+        command.arg(format!("http://{addr}/{index}"));
+    }
+
+    let output = run_command(&mut command).await;
+    let json = parse_ping_json(&output);
+    let results = json
+        .as_array()
+        .expect("multiple targets should use JSON array");
+
+    assert_eq!(results.len(), 70);
+    assert!(results.iter().all(|result| {
+        result["sent"].as_u64() == Some(1) && result["received"].as_u64() == Some(1)
+    }));
+}

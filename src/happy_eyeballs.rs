@@ -255,12 +255,10 @@ async fn probe_icmp(addr: IpAddr) -> Result<()> {
     use crate::pinger::Pinger;
     use std::sync::Arc;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-
     // Create a temporary client for this probe
     let client = Arc::new(crate::pinger::icmp::IcmpClient::new(addr.is_ipv6(), 64)?);
 
-    let mut pinger = crate::pinger::icmp::IcmpPinger::new(
+    let pinger = crate::pinger::icmp::IcmpPinger::new(
         "probe".to_string(),
         addr,
         64, // dummy ttl
@@ -269,15 +267,9 @@ async fn probe_icmp(addr: IpAddr) -> Result<()> {
         client,
     );
 
-    pinger.start(tx).await?;
-    pinger.ping(0).await?;
-
-    match rx.recv().await {
-        Some(res) => match res.status {
-            crate::session::ProbeStatus::Success(_) => Ok(()),
-            _ => Err(anyhow::anyhow!("Probe failed: {:?}", res.status)),
-        },
-        None => Err(anyhow::anyhow!("No result")),
+    match pinger.probe(0).await.status {
+        crate::session::ProbeStatus::Success(_) => Ok(()),
+        status => Err(anyhow::anyhow!("Probe failed: {:?}", status)),
     }
 }
 

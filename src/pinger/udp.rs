@@ -1,11 +1,8 @@
 use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
-use anyhow::Result;
 use async_trait::async_trait;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
 
 pub struct UdpPinger {
     target_name: String,
@@ -14,7 +11,6 @@ pub struct UdpPinger {
     size: usize,
     ttl: u32,
     timeout: Duration,
-    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl UdpPinger {
@@ -33,38 +29,24 @@ impl UdpPinger {
             size,
             ttl,
             timeout,
-            result_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Pinger for UdpPinger {
-    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
-        *self.result_tx.lock().await = Some(tx);
-        Ok(())
-    }
-
-    async fn ping(&self, seq: u64) -> Result<()> {
-        let Some(result_tx) = self.result_tx.lock().await.clone() else {
-            return Ok(());
-        };
-        let target_name = self.target_name.clone();
-        let target = self.target;
-        let port = self.port;
-        let size = self.size;
-        let ttl = self.ttl;
-        let timeout = self.timeout;
-
-        tokio::spawn(async move {
-            let (status, rtt, bytes) = probe(target, port, size, timeout, ttl).await;
-            send_result(&result_tx, target_name, target, seq, bytes, rtt, status).await;
-        });
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
+    async fn probe(&self, seq: u64) -> PingResult {
+        let (status, rtt, bytes) =
+            probe(self.target, self.port, self.size, self.timeout, self.ttl).await;
+        PingResult {
+            target: self.target_name.clone(),
+            target_addr: self.target,
+            seq,
+            bytes,
+            ttl: None,
+            rtt,
+            status,
+        }
     }
 }
 
@@ -141,28 +123,6 @@ async fn probe(
     )
 }
 
-async fn send_result(
-    tx: &mpsc::Sender<PingResult>,
-    target: String,
-    target_addr: IpAddr,
-    seq: u64,
-    bytes: usize,
-    rtt: Duration,
-    status: ProbeStatus,
-) {
-    let _ = tx
-        .send(PingResult {
-            target,
-            target_addr,
-            seq,
-            bytes,
-            ttl: None,
-            rtt,
-            status,
-        })
-        .await;
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -177,8 +137,7 @@ mod tests {
             server.send_to(&buffer[..size], peer).await.unwrap();
         });
 
-        let (tx, mut rx) = mpsc::channel(1);
-        let mut pinger = UdpPinger::new(
+        let pinger = UdpPinger::new(
             "localhost".to_string(),
             "127.0.0.1".parse().unwrap(),
             port,
@@ -186,12 +145,8 @@ mod tests {
             64,
             Duration::from_secs(1),
         );
-        pinger.start(tx).await.unwrap();
-        pinger.ping(1).await.unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        let result = tokio::time::timeout(Duration::from_secs(1), pinger.probe(1))
             .await
-            .unwrap()
             .unwrap();
         assert!(matches!(
             result.status,

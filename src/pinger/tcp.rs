@@ -1,10 +1,7 @@
 use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
-use anyhow::Result;
 use async_trait::async_trait;
 use std::net::IpAddr;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
 
 pub struct TcpPinger {
     target_name: String,
@@ -12,7 +9,6 @@ pub struct TcpPinger {
     port: u16,
     ttl: u32,
     timeout: std::time::Duration,
-    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl TcpPinger {
@@ -29,55 +25,23 @@ impl TcpPinger {
             port,
             ttl,
             timeout,
-            result_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Pinger for TcpPinger {
-    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
-        let mut guard = self.result_tx.lock().await;
-        *guard = Some(tx);
-        Ok(())
-    }
-
-    async fn ping(&self, seq: u64) -> Result<()> {
-        let result_tx = {
-            let guard = self.result_tx.lock().await;
-            if guard.is_none() {
-                return Ok(());
-            }
-            guard.clone().unwrap()
-        };
-
-        let timeout = self.timeout;
-        let ttl = self.ttl;
-        let port = self.port;
-        let target_name = self.target_name.clone();
-        let target = self.target;
-
-        tokio::spawn(async move {
-            let (status, rtt) = probe(target, port, timeout, ttl).await;
-
-            let _ = result_tx
-                .send(PingResult {
-                    target: target_name,
-                    target_addr: target,
-                    seq,
-                    bytes: 0,
-                    ttl: None,
-                    rtt,
-                    status,
-                })
-                .await;
-        });
-
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
+    async fn probe(&self, seq: u64) -> PingResult {
+        let (status, rtt) = probe(self.target, self.port, self.timeout, self.ttl).await;
+        PingResult {
+            target: self.target_name.clone(),
+            target_addr: self.target,
+            seq,
+            bytes: 0,
+            ttl: None,
+            rtt,
+            status,
+        }
     }
 }
 

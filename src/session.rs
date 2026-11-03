@@ -5,8 +5,14 @@ use anyhow::Result;
 use colored::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+// One permit per probe; protocol-specific FD weighting needs profiling before it is safe to add.
+const MAX_INFLIGHT_PROBES: usize = 64;
 
 pub use self::models::{PingResult, ProbeStatus, ResponseType};
 
@@ -164,8 +170,6 @@ mod models {
     }
 }
 
-use std::sync::Arc;
-
 #[derive(Serialize)]
 pub struct JsonResult {
     pub target: String,
@@ -201,6 +205,58 @@ pub struct Session {
     cli: Cli,
 }
 
+struct ScheduledPinger {
+    target: String,
+    pinger: Arc<dyn Pinger>,
+}
+
+struct ProbeScheduler {
+    cursor: usize,
+    sent_counts: Vec<u64>,
+}
+
+impl ProbeScheduler {
+    fn new(target_count: usize) -> Self {
+        Self {
+            cursor: 0,
+            sent_counts: vec![0; target_count],
+        }
+    }
+
+    fn plan(&mut self, count: Option<u64>, permits: usize) -> Vec<usize> {
+        let target_count = self.sent_counts.len();
+        if target_count == 0 || permits == 0 {
+            return Vec::new();
+        }
+
+        let mut selected = Vec::with_capacity(permits.min(target_count));
+        for offset in 0..target_count {
+            let index = (self.cursor + offset) % target_count;
+            if count.is_some_and(|limit| self.sent_counts[index] >= limit) {
+                continue;
+            }
+            selected.push(index);
+            if selected.len() == permits {
+                self.cursor = (index + 1) % target_count;
+                break;
+            }
+        }
+        selected
+    }
+
+    fn next_sequence(&self, target: usize) -> u64 {
+        self.sent_counts[target] + 1
+    }
+
+    fn record_sent(&mut self, target: usize) {
+        self.sent_counts[target] += 1;
+    }
+
+    fn all_reached(&self, count: u64) -> bool {
+        self.sent_counts.iter().all(|sent| *sent >= count)
+    }
+}
+
 impl Session {
     pub fn new(cli: Cli) -> Self {
         Self { cli }
@@ -223,12 +279,9 @@ impl Session {
 
         let headers = crate::utils::parse_headers(&self.cli.headers)?;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<models::PingResult>(100);
-
         let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
-        let mut pingers: Vec<Box<dyn Pinger>> = Vec::new();
-        let mut pinger_targets = Vec::new();
+        let mut pingers = Vec::new();
 
         #[cfg(unix)]
         let mut client_v4: Option<Arc<crate::pinger::icmp::IcmpClient>> = None;
@@ -328,7 +381,7 @@ impl Session {
                         headers: headers.clone(),
                     };
 
-                    let mut pinger = crate::pinger::create_pinger(
+                    let pinger = crate::pinger::create_pinger(
                         target_string.to_string(),
                         protocol,
                         target_addr,
@@ -336,13 +389,10 @@ impl Session {
                         client_v4.clone(),
                         client_v6.clone(),
                     );
-
-                    if let Err(e) = pinger.start(tx.clone()).await {
-                        eprintln!("Failed to start pinger for {}: {}", target_string, e);
-                        continue;
-                    }
-                    pingers.push(pinger);
-                    pinger_targets.push(target_string.to_string());
+                    pingers.push(ScheduledPinger {
+                        target: target_string.to_string(),
+                        pinger,
+                    });
                 }
                 Err(e) => {
                     eprintln!("pingx: {}: {}", target_string, e);
@@ -353,15 +403,16 @@ impl Session {
             }
         }
 
-        drop(tx);
-
         if pingers.is_empty() {
             return Ok(());
         }
 
         let mut interval = tokio::time::interval(self.cli.interval);
-        let mut seq = 1;
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let count = self.cli.count;
+        let mut scheduler = ProbeScheduler::new(pingers.len());
+        let probe_slots = Arc::new(Semaphore::new(MAX_INFLIGHT_PROBES));
+        let mut tasks = JoinSet::new();
 
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
@@ -379,64 +430,75 @@ impl Session {
         };
         let has_deadline = self.cli.deadline.is_some();
 
-        let mut inflight_packets = 0;
-
         loop {
             tokio::select! {
                 _ = interval.tick(), if !waiting_for_shutdown => {
-                    if let Some(c) = count
-                        && seq > c {
-                            waiting_for_shutdown = true;
-                            if inflight_packets == 0 { break; }
-                            // Reset sleep to wait for stragglers
-                            wait_timeout = Box::pin(tokio::time::sleep(self.cli.timeout + Duration::from_millis(100)));
-                            continue;
+                    for index in scheduler.plan(count, probe_slots.available_permits()) {
+                        let Ok(permit) = probe_slots.clone().try_acquire_owned() else {
+                            break;
+                        };
+                        let seq = scheduler.next_sequence(index);
+                        let target = pingers[index].target.clone();
+                        let pinger = pingers[index].pinger.clone();
+                        if let Some(stats) = all_stats.get_mut(&target) {
+                            stats.record_sent(seq);
+                        }
+                        scheduler.record_sent(index);
+                        tasks.spawn(async move {
+                            let result = pinger.probe(seq).await;
+                            (result, permit)
+                        });
                     }
 
-                    for (target, pinger) in pinger_targets.iter().zip(&pingers) {
-                        if let Err(e) = pinger.ping(seq).await {
-                            eprintln!("Failed to ping: {}", e);
-                        } else {
-                            if let Some(stats) = all_stats.get_mut(target) {
-                                stats.record_sent(seq);
-                            }
-                            inflight_packets += 1;
+                    if let Some(limit) = count
+                        && scheduler.all_reached(limit)
+                    {
+                        waiting_for_shutdown = true;
+                        if tasks.is_empty() {
+                            break;
                         }
+                        wait_timeout = Box::pin(tokio::time::sleep(
+                            self.cli.timeout + Duration::from_millis(100),
+                        ));
                     }
-                    seq += 1;
                 }
 
                 _ = &mut deadline_sleep, if has_deadline => {
+                    tasks.abort_all();
                     break;
                 }
 
                 _ = &mut wait_timeout, if waiting_for_shutdown => {
+                    tasks.abort_all();
                     break;
                 }
 
-                Some(result) = rx.recv() => {
-                    let settled = all_stats
-                        .get_mut(&result.target)
-                        .is_some_and(|stats| stats.update(&result));
-                    if settled && inflight_packets > 0 { inflight_packets -= 1; }
-                    if !quiet && !json_stdout {
-                        let protocol = target_protocols.get(&result.target).unwrap_or(&crate::cli::Protocol::Icmp);
-                        Self::print_result(&result, protocol, &self.cli)?;
+                Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                    match joined {
+                        Ok((result, permit)) => {
+                            if let Some(stats) = all_stats.get_mut(&result.target) {
+                                stats.update(&result);
+                            }
+                            if !quiet && !json_stdout {
+                                let protocol = target_protocols
+                                    .get(&result.target)
+                                    .unwrap_or(&crate::cli::Protocol::Icmp);
+                                Self::print_result(&result, protocol, &self.cli)?;
+                            }
+                            drop(permit);
+                        }
+                        Err(error) => eprintln!("Probe task failed: {}", error),
                     }
-
-                    if waiting_for_shutdown && inflight_packets == 0 {
+                    if waiting_for_shutdown && tasks.is_empty() {
                         break;
                     }
                 }
 
                 _ = stop_rx.recv() => {
+                    tasks.abort_all();
                     break;
                 }
             }
-        }
-
-        for mut p in pingers {
-            p.stop().await.ok();
         }
 
         // JSON Output Logic
@@ -1237,5 +1299,27 @@ mod tests {
             unique_targets(&targets),
             ["first.example", "second.example"]
         );
+    }
+
+    #[test]
+    fn scheduler_rotates_targets_and_counts_only_dispatched_probes() {
+        let mut scheduler = ProbeScheduler::new(5);
+
+        assert_eq!(scheduler.plan(None, 2), [0, 1]);
+        scheduler.record_sent(0);
+        scheduler.record_sent(1);
+        assert_eq!(scheduler.plan(None, 2), [2, 3]);
+        scheduler.record_sent(2);
+        scheduler.record_sent(3);
+        assert_eq!(scheduler.plan(None, 2), [4, 0]);
+        scheduler.record_sent(4);
+        scheduler.record_sent(0);
+
+        assert_eq!(scheduler.plan(Some(2), 5), [1, 2, 3, 4]);
+        for target in [1, 2, 3, 4] {
+            scheduler.record_sent(target);
+        }
+        assert!(scheduler.all_reached(2));
+        assert!(scheduler.plan(Some(2), 5).is_empty());
     }
 }

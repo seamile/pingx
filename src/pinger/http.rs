@@ -1,12 +1,9 @@
 use crate::pinger::Pinger;
 use crate::session::{PingResult, ProbeStatus, ResponseType};
-use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::{Client, Method, Url, header::HeaderMap};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
 
 pub struct HttpPinger {
     target_name: String,
@@ -14,7 +11,6 @@ pub struct HttpPinger {
     target_ip: IpAddr,
     client: Client,
     headers: HeaderMap,
-    result_tx: Arc<Mutex<Option<mpsc::Sender<PingResult>>>>,
 }
 
 impl HttpPinger {
@@ -47,83 +43,50 @@ impl HttpPinger {
             target_ip,
             client,
             headers,
-            result_tx: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[async_trait]
 impl Pinger for HttpPinger {
-    async fn start(&mut self, tx: mpsc::Sender<PingResult>) -> Result<()> {
-        let mut guard = self.result_tx.lock().await;
-        *guard = Some(tx);
-        Ok(())
-    }
+    async fn probe(&self, seq: u64) -> PingResult {
+        let start = Instant::now();
+        let request = self
+            .client
+            .request(Method::HEAD, self.target_url.clone())
+            .headers(self.headers.clone());
 
-    async fn ping(&self, seq: u64) -> Result<()> {
-        let result_tx = {
-            let guard = self.result_tx.lock().await;
-            if guard.is_none() {
-                return Ok(());
+        let (status, rtt, bytes) = match request.send().await {
+            Ok(response) => {
+                let rtt = start.elapsed();
+                let status_code = response.status();
+                let len = response.content_length().unwrap_or(0) as usize;
+                (
+                    ProbeStatus::Success(ResponseType::HttpResponse(status_code.as_u16())),
+                    rtt,
+                    len,
+                )
             }
-            guard.clone().unwrap()
+            Err(error) if error.is_timeout() => (ProbeStatus::Timeout, Duration::ZERO, 0),
+            Err(error) => (
+                ProbeStatus::NetworkError {
+                    node: Some(self.target_ip),
+                    reason: error.to_string(),
+                },
+                Duration::ZERO,
+                0,
+            ),
         };
 
-        let target_name = self.target_name.clone();
-        let target_ip = self.target_ip;
-        let url = self.target_url.clone();
-        let client = self.client.clone();
-        let headers = self.headers.clone();
-
-        tokio::spawn(async move {
-            let start = Instant::now();
-            let request = client.request(Method::HEAD, url).headers(headers);
-
-            let (status_res, rtt, bytes) = match request.send().await {
-                Ok(response) => {
-                    let rtt = start.elapsed();
-                    let status_code = response.status();
-                    let len = response.content_length().unwrap_or(0) as usize;
-                    (
-                        ProbeStatus::Success(ResponseType::HttpResponse(status_code.as_u16())),
-                        rtt,
-                        len,
-                    )
-                }
-                Err(e) => {
-                    if e.is_timeout() {
-                        (ProbeStatus::Timeout, Duration::ZERO, 0)
-                    } else {
-                        (
-                            ProbeStatus::NetworkError {
-                                node: Some(target_ip),
-                                reason: e.to_string(),
-                            },
-                            Duration::ZERO,
-                            0,
-                        )
-                    }
-                }
-            };
-
-            let _ = result_tx
-                .send(PingResult {
-                    target: target_name,
-                    target_addr: target_ip,
-                    seq,
-                    bytes,
-                    ttl: None,
-                    rtt,
-                    status: status_res,
-                })
-                .await;
-        });
-
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
+        PingResult {
+            target: self.target_name.clone(),
+            target_addr: self.target_ip,
+            seq,
+            bytes,
+            ttl: None,
+            rtt,
+            status,
+        }
     }
 }
 
@@ -147,20 +110,15 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut pinger = HttpPinger::new(
+        let pinger = HttpPinger::new(
             "test".to_string(),
             Url::parse(&format!("http://{addr}/")).unwrap(),
             addr.ip(),
             Duration::from_secs(1),
             HeaderMap::new(),
         );
-        let (tx, mut rx) = mpsc::channel(1);
-        pinger.start(tx).await.unwrap();
-        pinger.ping(1).await.unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let result = tokio::time::timeout(Duration::from_secs(2), pinger.probe(1))
             .await
-            .unwrap()
             .unwrap();
         assert!(matches!(
             result.status,
