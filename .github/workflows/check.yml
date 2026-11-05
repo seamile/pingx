@@ -2,7 +2,7 @@ name: Check
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   workflow_dispatch:
     inputs:
       ref:
@@ -45,11 +45,8 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Debug build
-        run: cargo build --target ${{ matrix.target }}
-
       - name: Clippy
         run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: Test
-        run: cargo test --release --target ${{ matrix.target }}
+        run: cargo test --target ${{ matrix.target }}

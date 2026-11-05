@@ -87,10 +87,11 @@ mod macos {
     use crate::cli::Cli;
     use anyhow::{Context, Result};
     use serde::{Deserialize, Serialize};
-    use std::ffi::{CString, OsString};
+    use std::ffi::{CStr, CString, OsStr, OsString};
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, IsTerminal, Read, Write};
     use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -104,7 +105,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 6;
+    const PROTOCOL_VERSION: u16 = 7;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -914,10 +915,11 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             state.protocol_version
         );
         let listener = activated_listener()?;
-        serve(listener, state).await
+        let user_home = home_dir_for_uid(state.allowed_uid)?;
+        serve(listener, state, user_home).await
     }
 
-    async fn serve(listener: UnixListener, state: HelperState) -> Result<()> {
+    async fn serve(listener: UnixListener, state: HelperState, user_home: PathBuf) -> Result<()> {
         let mut sessions = tokio::task::JoinSet::new();
         loop {
             reap_sessions(&mut sessions);
@@ -925,7 +927,9 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             match accepted {
                 Ok(Ok((stream, _))) => {
                     let state = state.clone();
-                    sessions.spawn(async move { handle_connection(stream, &state).await });
+                    let user_home = user_home.clone();
+                    sessions
+                        .spawn(async move { handle_connection(stream, &state, &user_home).await });
                 }
                 Ok(Err(error)) => return Err(error).context("accept helper connection"),
                 Err(_) => {
@@ -948,7 +952,11 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         }
     }
 
-    async fn handle_connection(stream: UnixStream, state: &HelperState) -> Result<()> {
+    async fn handle_connection(
+        stream: UnixStream,
+        state: &HelperState,
+        user_home: &Path,
+    ) -> Result<()> {
         let credentials = stream.peer_cred().context("read peer credentials")?;
         anyhow::ensure!(
             credentials.uid() == state.allowed_uid,
@@ -980,17 +988,18 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 .await
             }
             Action::Run(operation) => {
-                let response = match run_operation(operation, &mut reader, &mut writer).await {
-                    Ok(Some(code)) => Response {
-                        protocol_version: PROTOCOL_VERSION,
-                        result: ResponseResult::Exit { code },
-                    },
-                    Ok(None) => return Ok(()),
-                    Err(error) => Response {
-                        protocol_version: PROTOCOL_VERSION,
-                        result: ResponseResult::Error(format!("{error:#}")),
-                    },
-                };
+                let response =
+                    match run_operation(operation, user_home, &mut reader, &mut writer).await {
+                        Ok(Some(code)) => Response {
+                            protocol_version: PROTOCOL_VERSION,
+                            result: ResponseResult::Exit { code },
+                        },
+                        Ok(None) => return Ok(()),
+                        Err(error) => Response {
+                            protocol_version: PROTOCOL_VERSION,
+                            result: ResponseResult::Error(format!("{error:#}")),
+                        },
+                    };
                 write_response(&mut writer, &response).await
             }
         }
@@ -998,6 +1007,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
 
     async fn run_operation(
         operation: Operation,
+        user_home: &Path,
         client_reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
         writer: &mut tokio::net::unix::OwnedWriteHalf,
     ) -> Result<Option<i32>> {
@@ -1005,6 +1015,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         let current_exe = std::env::current_exe().context("resolve helper executable")?;
         let child = tokio::process::Command::new(current_exe)
             .arg(super::INTERNAL_WORKER_ARG)
+            .env("HOME", user_home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1487,6 +1498,42 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         UnixListener::from_std(listener).context("register launchd socket")
     }
 
+    fn home_dir_for_uid(uid: u32) -> Result<PathBuf> {
+        let mut buffer = vec![0_u8; 1024];
+        loop {
+            let mut passwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+            let mut result = std::ptr::null_mut();
+            let status = unsafe {
+                libc::getpwuid_r(
+                    uid,
+                    &mut passwd,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &mut result,
+                )
+            };
+            if status == libc::ERANGE {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            anyhow::ensure!(
+                status == 0,
+                "failed to resolve home directory for UID {uid}: {}",
+                io::Error::from_raw_os_error(status)
+            );
+            anyhow::ensure!(
+                !result.is_null() && !passwd.pw_dir.is_null(),
+                "no passwd entry for UID {uid}"
+            );
+            let home = unsafe { CStr::from_ptr(passwd.pw_dir) };
+            anyhow::ensure!(
+                !home.to_bytes().is_empty(),
+                "UID {uid} has no home directory"
+            );
+            return Ok(PathBuf::from(OsStr::from_bytes(home.to_bytes())));
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1564,6 +1611,12 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             assert!(plist.contains(super::super::INTERNAL_DAEMON_ARG));
             assert!(plist.contains("<key>SockPathOwner</key><integer>501</integer>"));
             assert!(plist.contains("<key>SockPathMode</key><integer>384</integer>"));
+        }
+
+        #[test]
+        fn current_user_home_directory_is_available_to_the_worker() {
+            let home = home_dir_for_uid(unsafe { libc::getuid() }).unwrap();
+            assert!(home.is_absolute());
         }
 
         #[test]
@@ -2110,6 +2163,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                         protocol_version: PROTOCOL_VERSION,
                         allowed_uid,
                     },
+                    Path::new("/tmp"),
                 )
                 .await
             });
@@ -2150,6 +2204,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                     protocol_version: PROTOCOL_VERSION,
                     allowed_uid,
                 },
+                Path::new("/tmp"),
             )
             .await
             .unwrap_err();
@@ -2166,6 +2221,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                         protocol_version: PROTOCOL_VERSION,
                         allowed_uid: unsafe { libc::geteuid() } as u32,
                     },
+                    Path::new("/tmp"),
                 )
                 .await
             });
@@ -2198,7 +2254,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 protocol_version: PROTOCOL_VERSION,
                 allowed_uid,
             };
-            let daemon = tokio::spawn(serve(listener, state));
+            let daemon = tokio::spawn(serve(listener, state, std::env::temp_dir()));
             let stream = UnixStream::connect(&path).await.unwrap();
             let (reader, mut writer) = stream.into_split();
             write_frame(
