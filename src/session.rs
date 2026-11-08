@@ -5,6 +5,7 @@ use anyhow::Result;
 use colored::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal;
@@ -175,9 +176,16 @@ pub struct JsonResult {
     pub target: String,
     pub protocol: String,
     pub target_port: Option<u16>,
-    pub ip: String,
     pub packet_size: usize,
     pub ttl: u32,
+    pub addresses: Vec<JsonAddressResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<JsonTimestamp>,
+}
+
+#[derive(Serialize)]
+pub struct JsonAddressResult {
+    pub ip: String,
     pub sent: u64,
     pub received: u64,
     pub loss: f64,
@@ -190,8 +198,6 @@ pub struct JsonResult {
     pub response_counts: std::collections::BTreeMap<String, u64>,
     pub local_failures: u64,
     pub network_errors: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<JsonTimestamp>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +205,47 @@ pub struct JsonResult {
 pub enum JsonTimestamp {
     Unix(f64),
     Iso(String),
+}
+
+fn json_address_result(stats: &models::PingStats) -> JsonAddressResult {
+    let loss = if stats.transmitted > 0 {
+        100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
+    } else {
+        0.0
+    };
+    let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
+    let (min, max, avg, mdev, jitter) = stats
+        .rtt_metrics()
+        .map(|(min, max, avg, mdev, jitter)| {
+            (
+                (min * 1000.0).round() / 1000.0,
+                (max * 1000.0).round() / 1000.0,
+                (avg * 1000.0).round() / 1000.0,
+                (mdev * 1000.0).round() / 1000.0,
+                (jitter * 1000.0).round() / 1000.0,
+            )
+        })
+        .unwrap_or_default();
+
+    JsonAddressResult {
+        ip: stats._address.to_string(),
+        sent: stats.transmitted,
+        received: stats.received,
+        loss: (loss * 1000.0).round() / 1000.0,
+        time: (total_time * 1000.0).round() / 1000.0,
+        min,
+        avg,
+        max,
+        mdev,
+        jitter,
+        response_counts: stats
+            .response_counts
+            .iter()
+            .map(|(kind, count)| (kind.as_str(), *count))
+            .collect(),
+        local_failures: stats.local_failures,
+        network_errors: stats.network_errors,
+    }
 }
 
 pub struct Session {
@@ -279,7 +326,15 @@ impl Session {
 
         let headers = crate::utils::parse_headers(&self.cli.headers)?;
 
-        let mut all_stats: HashMap<String, models::PingStats> = HashMap::new();
+        let ip_version = if self.cli.ipv4 {
+            IpVersion::V4
+        } else if self.cli.ipv6 {
+            IpVersion::V6
+        } else {
+            IpVersion::Any
+        };
+
+        let mut stats = Vec::new();
         let mut target_protocols: HashMap<String, crate::cli::Protocol> = HashMap::new();
         let mut pingers = Vec::new();
 
@@ -308,91 +363,87 @@ impl Session {
 
             target_protocols.insert(target_string.to_string(), protocol.clone());
 
-            let ip_version = if self.cli.ipv4 {
-                IpVersion::V4
-            } else if self.cli.ipv6 {
-                IpVersion::V6
-            } else {
-                IpVersion::Any
-            };
-
             match resolve_host(&host_to_resolve, ip_version).await {
                 Ok(addrs) => {
-                    let target_addr =
-                        match crate::happy_eyeballs::select_best_addr(addrs, &protocol).await {
-                            Ok(addr) => addr,
-                            Err(e) => {
-                                eprintln!("pingx: {}: {}", target_string, e);
-                                if !multi_target {
-                                    return Err(e);
-                                }
-                                continue;
+                    let probe_addrs = match addresses_to_probe(addrs, &protocol).await {
+                        Ok(addrs) => addrs,
+                        Err(e) => {
+                            eprintln!("pingx: {}: {}", target_string, e);
+                            if !multi_target {
+                                return Err(e);
                             }
-                        };
+                            continue;
+                        }
+                    };
 
-                    // Initialize ICMP client if needed
-                    #[cfg(unix)]
-                    if let crate::cli::Protocol::Icmp = protocol {
-                        if target_addr.is_ipv4() {
-                            if client_v4.is_none() {
-                                match crate::pinger::icmp::IcmpClient::new(false, self.cli.ttl) {
-                                    Ok(c) => client_v4 = Some(Arc::new(c)),
+                    let first_pinger = pingers.len();
+                    let mut target_error: Option<anyhow::Error> = None;
+
+                    for target_addr in probe_addrs {
+                        // Initialize the shared ICMP client for this address family.
+                        #[cfg(unix)]
+                        if matches!(&protocol, crate::cli::Protocol::Icmp) {
+                            let is_ipv6 = target_addr.is_ipv6();
+                            let client = if is_ipv6 {
+                                &mut client_v6
+                            } else {
+                                &mut client_v4
+                            };
+                            if client.is_none() {
+                                match crate::pinger::icmp::IcmpClient::new(is_ipv6, self.cli.ttl) {
+                                    Ok(created) => *client = Some(Arc::new(created)),
                                     Err(e) => {
-                                        eprintln!("Failed to create IPv4 ICMP client: {}", e);
-                                        if !multi_target {
-                                            return Err(anyhow::anyhow!(e));
-                                        }
+                                        let error = anyhow::anyhow!(e);
+                                        let family = if is_ipv6 { "IPv6" } else { "IPv4" };
+                                        eprintln!("Failed to create {family} ICMP client: {error}");
+                                        target_error = Some(error);
                                         continue;
                                     }
                                 }
                             }
-                        } else if client_v6.is_none() {
-                            match crate::pinger::icmp::IcmpClient::new(true, self.cli.ttl) {
-                                Ok(c) => client_v6 = Some(Arc::new(c)),
-                                Err(e) => {
-                                    eprintln!("Failed to create IPv6 ICMP client: {}", e);
-                                    if !multi_target {
-                                        return Err(anyhow::anyhow!(e));
-                                    }
-                                    continue;
-                                }
-                            }
                         }
-                    }
 
-                    all_stats.insert(
-                        target_string.to_string(),
-                        models::PingStats::new(target_string.to_string(), target_addr),
-                    );
-
-                    if show_headers && !json_stdout {
-                        Self::print_header(
-                            target_string,
+                        stats.push(models::PingStats::new(
+                            target_string.to_string(),
                             target_addr,
-                            &protocol,
-                            self.cli.ping_size(),
+                        ));
+
+                        if show_headers && !json_stdout {
+                            Self::print_header(
+                                target_string,
+                                target_addr,
+                                &protocol,
+                                self.cli.ping_size(),
+                            );
+                        }
+
+                        let config = crate::pinger::PingerConfig {
+                            ttl: self.cli.ttl,
+                            size: self.cli.ping_size(),
+                            timeout: self.cli.timeout,
+                            headers: headers.clone(),
+                        };
+
+                        let pinger = crate::pinger::create_pinger(
+                            target_string.to_string(),
+                            protocol.clone(),
+                            target_addr,
+                            config,
+                            client_v4.clone(),
+                            client_v6.clone(),
                         );
+                        pingers.push(ScheduledPinger {
+                            target: target_string.to_string(),
+                            pinger,
+                        });
                     }
 
-                    let config = crate::pinger::PingerConfig {
-                        ttl: self.cli.ttl,
-                        size: self.cli.ping_size(),
-                        timeout: self.cli.timeout,
-                        headers: headers.clone(),
-                    };
-
-                    let pinger = crate::pinger::create_pinger(
-                        target_string.to_string(),
-                        protocol,
-                        target_addr,
-                        config,
-                        client_v4.clone(),
-                        client_v6.clone(),
-                    );
-                    pingers.push(ScheduledPinger {
-                        target: target_string.to_string(),
-                        pinger,
-                    });
+                    if pingers.len() == first_pinger
+                        && let Some(error) = target_error
+                        && !multi_target
+                    {
+                        return Err(error);
+                    }
                 }
                 Err(e) => {
                     eprintln!("pingx: {}: {}", target_string, e);
@@ -438,15 +489,12 @@ impl Session {
                             break;
                         };
                         let seq = scheduler.next_sequence(index);
-                        let target = pingers[index].target.clone();
                         let pinger = pingers[index].pinger.clone();
-                        if let Some(stats) = all_stats.get_mut(&target) {
-                            stats.record_sent(seq);
-                        }
+                        stats[index].record_sent(seq);
                         scheduler.record_sent(index);
                         tasks.spawn(async move {
                             let result = pinger.probe(seq).await;
-                            (result, permit)
+                            (index, result, permit)
                         });
                     }
 
@@ -475,10 +523,8 @@ impl Session {
 
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
                     match joined {
-                        Ok((result, permit)) => {
-                            if let Some(stats) = all_stats.get_mut(&result.target) {
-                                stats.update(&result);
-                            }
+                        Ok((index, result, permit)) => {
+                            stats[index].update(&result);
                             if !quiet && !json_stdout {
                                 let protocol = target_protocols
                                     .get(&result.target)
@@ -506,70 +552,35 @@ impl Session {
             let mut json_results = Vec::new();
 
             for &target_host in &targets {
-                if let Some(stats) = all_stats.get(target_host) {
-                    let protocol = target_protocols
-                        .get(target_host)
-                        .unwrap_or(&crate::cli::Protocol::Icmp);
-                    let protocol_str = protocol.name().to_string();
-
-                    // Calculate stats
-                    let loss = if stats.transmitted > 0 {
-                        100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
-                    } else {
-                        0.0
-                    };
-                    let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
-
-                    let (min, max, avg, mdev, jitter) = stats
-                        .rtt_metrics()
-                        .map(|(min, max, avg, mdev, jitter)| {
-                            (
-                                (min * 1000.0).round() / 1000.0,
-                                (max * 1000.0).round() / 1000.0,
-                                (avg * 1000.0).round() / 1000.0,
-                                (mdev * 1000.0).round() / 1000.0,
-                                (jitter * 1000.0).round() / 1000.0,
-                            )
-                        })
-                        .unwrap_or_default();
-
-                    json_results.push(JsonResult {
-                        target: target_host.to_string(),
-                        protocol: protocol_str,
-                        target_port: protocol.port(),
-                        ip: stats._address.to_string(),
-                        packet_size: self.cli.ping_size(),
-                        ttl: self.cli.ttl,
-                        sent: stats.transmitted,
-                        received: stats.received,
-                        loss: (loss * 1000.0).round() / 1000.0,
-                        time: (total_time * 1000.0).round() / 1000.0,
-                        min,
-                        avg,
-                        max,
-                        mdev,
-                        jitter,
-                        response_counts: stats
-                            .response_counts
-                            .iter()
-                            .map(|(kind, count)| (kind.as_str(), *count))
-                            .collect(),
-                        local_failures: stats.local_failures,
-                        network_errors: stats.network_errors,
-                        timestamp: self
-                            .cli
-                            .timestamp
-                            .then(|| json_timestamp(self.cli.timestamp_format.unwrap_or_default()))
-                            .transpose()?,
-                    });
+                let addresses = pingers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, pinger)| pinger.target == target_host)
+                    .map(|(index, _)| json_address_result(&stats[index]))
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    continue;
                 }
+
+                let protocol = target_protocols
+                    .get(target_host)
+                    .unwrap_or(&crate::cli::Protocol::Icmp);
+                json_results.push(JsonResult {
+                    target: target_host.to_string(),
+                    protocol: protocol.name().to_string(),
+                    target_port: protocol.port(),
+                    packet_size: self.cli.ping_size(),
+                    ttl: self.cli.ttl,
+                    addresses,
+                    timestamp: self
+                        .cli
+                        .timestamp
+                        .then(|| json_timestamp(self.cli.timestamp_format.unwrap_or_default()))
+                        .transpose()?,
+                });
             }
 
-            let json_output = if json_results.len() == 1 {
-                serde_json::to_string_pretty(&json_results[0]).unwrap()
-            } else {
-                serde_json::to_string_pretty(&json_results).unwrap()
-            };
+            let json_output = serialize_json_results(&json_results, multi_target);
 
             if let Some(path) = json_arg {
                 write_json_file(path, json_output.as_bytes())?;
@@ -587,20 +598,19 @@ impl Session {
         let mut global_key_widths = [0usize; 3];
         let mut global_val_widths = [0usize; 3];
 
-        for &target_host in &targets {
-            if let Some(stats) = all_stats.get(target_host) {
-                let table = Self::prepare_table_data(stats);
-                for r in 0..3 {
-                    for c in 0..3 {
-                        global_key_widths[c] =
-                            std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
-                        global_val_widths[c] =
-                            std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
-                    }
+        for (index, pinger) in pingers.iter().enumerate() {
+            let stats = &stats[index];
+            let table = Self::prepare_table_data(stats);
+            for r in 0..3 {
+                for c in 0..3 {
+                    global_key_widths[c] =
+                        std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
+                    global_val_widths[c] =
+                        std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
                 }
-                let country = geo.as_ref().and_then(|g| g.country_code(stats._address));
-                tables.push((target_host.to_string(), country, stats._address, table));
             }
+            let country = geo.as_ref().and_then(|g| g.country_code(stats._address));
+            tables.push((pinger.target.clone(), country, stats._address, table));
         }
 
         // Print all tables with global widths
@@ -906,6 +916,38 @@ fn unique_targets(targets: &[String]) -> Vec<&str> {
         .collect()
 }
 
+async fn addresses_to_probe(
+    addrs: Vec<IpAddr>,
+    protocol: &crate::cli::Protocol,
+) -> Result<Vec<IpAddr>> {
+    if matches!(protocol, crate::cli::Protocol::Http(_)) {
+        Ok(vec![
+            crate::happy_eyeballs::select_best_addr(addrs, protocol).await?,
+        ])
+    } else {
+        Ok(unique_addresses(addrs))
+    }
+}
+
+fn unique_addresses(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+    let mut seen = HashSet::new();
+    addrs
+        .into_iter()
+        .filter(|address| seen.insert(*address))
+        .collect()
+}
+
+fn serialize_json_results(results: &[JsonResult], multi_target: bool) -> String {
+    if multi_target {
+        serde_json::to_string_pretty(results).unwrap()
+    } else {
+        results.first().map_or_else(
+            || "[]".to_string(),
+            |result| serde_json::to_string_pretty(result).unwrap(),
+        )
+    }
+}
+
 fn timestamp_prefix_at(format: crate::cli::TimestampFormat, now: SystemTime) -> Result<String> {
     use crate::cli::TimestampFormat;
     let now = now
@@ -957,6 +999,36 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Duration;
+
+    fn json_address(ip: &str) -> JsonAddressResult {
+        JsonAddressResult {
+            ip: ip.into(),
+            sent: 1,
+            received: 1,
+            loss: 0.0,
+            time: 1.0,
+            min: 1.0,
+            avg: 1.0,
+            max: 1.0,
+            mdev: 0.0,
+            jitter: 0.0,
+            response_counts: Default::default(),
+            local_failures: 0,
+            network_errors: 0,
+        }
+    }
+
+    fn json_result(target: &str, ips: &[&str]) -> JsonResult {
+        JsonResult {
+            target: target.into(),
+            protocol: "icmp".into(),
+            target_port: None,
+            packet_size: 56,
+            ttl: 64,
+            addresses: ips.iter().map(|ip| json_address(ip)).collect(),
+            timestamp: None,
+        }
+    }
 
     #[test]
     fn report_title_prefixes_country_code_and_domain_address() {
@@ -1046,21 +1118,9 @@ mod tests {
                 target: "test".into(),
                 protocol: "icmp".into(),
                 target_port: None,
-                ip: "127.0.0.1".into(),
                 packet_size: 56,
                 ttl: 64,
-                sent: 0,
-                received: 0,
-                loss: 0.0,
-                time: 0.0,
-                min: 0.0,
-                avg: 0.0,
-                max: 0.0,
-                mdev: 0.0,
-                jitter: 0.0,
-                response_counts: Default::default(),
-                local_failures: 0,
-                network_errors: 0,
+                addresses: vec![json_address("127.0.0.1")],
                 timestamp: Some(JsonTimestamp::Unix(1_793_427_601.123_456)),
             })
             .unwrap()["timestamp"],
@@ -1307,6 +1367,57 @@ mod tests {
             unique_targets(&targets),
             ["first.example", "second.example"]
         );
+    }
+
+    #[test]
+    fn resolved_addresses_are_deduplicated_in_resolution_order() {
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        assert_eq!(unique_addresses(vec![v6, v4, v6, v4]), [v6, v4]);
+    }
+
+    #[tokio::test]
+    async fn non_http_ping_keeps_all_resolved_addresses() {
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        for protocol in [
+            crate::cli::Protocol::Icmp,
+            crate::cli::Protocol::Tcp(80),
+            crate::cli::Protocol::Udp(33434),
+        ] {
+            assert_eq!(
+                addresses_to_probe(vec![v6, v4, v6], &protocol)
+                    .await
+                    .unwrap(),
+                [v6, v4]
+            );
+        }
+    }
+
+    #[test]
+    fn json_groups_all_address_statistics_under_one_target() {
+        let results = vec![json_result(
+            "dual.example",
+            &["2001:db8::10", "203.0.113.30"],
+        )];
+        let value: serde_json::Value =
+            serde_json::from_str(&serialize_json_results(&results, false)).unwrap();
+
+        assert!(value.is_object());
+        assert_eq!(value["target"], "dual.example");
+        assert!(value.get("sent").is_none());
+        assert!(value.get("ip").is_none());
+        assert_eq!(value["addresses"].as_array().unwrap().len(), 2);
+        assert_eq!(value["addresses"][0]["ip"], "2001:db8::10");
+        assert_eq!(value["addresses"][1]["ip"], "203.0.113.30");
+        assert_eq!(value["addresses"][0]["sent"], 1);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serialize_json_results(&results, true)).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), 1);
+        assert_eq!(value[0]["addresses"].as_array().unwrap().len(), 2);
     }
 
     #[test]

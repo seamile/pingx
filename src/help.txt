@@ -12,7 +12,7 @@ Options:
   -V, --version             Print version
 
 Ping Options:
-  -c <COUNT>                Stop after sending COUNT probes per target
+  -c <COUNT>                Send COUNT probes per resolved address
   -i <INTERVAL>             Probe interval, in seconds [default: 1.0]
   -w <DEADLINE>             Stop after DEADLINE seconds
   -t <TTL>                  IP Time to Live [default: 64]
@@ -56,6 +56,7 @@ Helper Commands (macOS):
 Notes:
   • Auto mode: HOST uses ICMP, HOST:PORT uses TCP, and HTTP URLs use HTTP.
     -T or -U overrides host targets; traceroute follows the same rules.
+  • ICMP/TCP/UDP Ping probes all resolved addresses; HTTP selects one address.
   • -T, -U, and -H are mutually exclusive; so are -4 and -6.
   • --ts-fmt requires -D: unix uses [seconds.microseconds], iso uses UTC RFC 3339.
   • Traceroute rejects HTTP/GeoIP modes and ignores -c, -i, -w, -t, -q, and --header.

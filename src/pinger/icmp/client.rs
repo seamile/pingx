@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Instant;
 
 #[cfg(unix)]
@@ -280,6 +281,7 @@ impl ReplyMap {
 pub struct IcmpClient {
     socket: AsyncSocket,
     reply_map: ReplyMap,
+    next_sequence: Arc<AtomicU16>,
     recv_task: Arc<JoinHandle<()>>,
 }
 
@@ -360,6 +362,7 @@ impl IcmpClient {
         Ok(Self {
             socket,
             reply_map,
+            next_sequence: Arc::new(AtomicU16::new(1)),
             recv_task: Arc::new(recv_task),
         })
     }
@@ -370,6 +373,11 @@ impl IcmpClient {
 
     pub fn register(&self, host: IpAddr, ident: Option<u16>, seq: u16) -> oneshot::Receiver<Reply> {
         self.reply_map.new_waiter(host, ident, seq)
+    }
+
+    pub fn next_sequence(&self) -> u16 {
+        // Pingers share this client, so wire sequences must be unique across addresses.
+        self.next_sequence.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn unregister(&self, host: IpAddr, ident: Option<u16>, seq: u16) {

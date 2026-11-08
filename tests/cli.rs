@@ -93,9 +93,9 @@ async fn deadline_counts_an_inflight_probe_as_sent() {
     let output = run_command(&mut command).await;
     let json = parse_ping_json(&output);
 
-    assert!(json["sent"].as_u64().unwrap() >= 1);
-    assert_eq!(json["received"].as_u64(), Some(0));
-    assert_eq!(json["loss"].as_f64(), Some(100.0));
+    assert!(json["addresses"][0]["sent"].as_u64().unwrap() >= 1);
+    assert_eq!(json["addresses"][0]["received"].as_u64(), Some(0));
+    assert_eq!(json["addresses"][0]["loss"].as_f64(), Some(100.0));
 }
 
 #[cfg(unix)]
@@ -126,8 +126,8 @@ async fn ctrl_c_counts_an_inflight_probe_as_sent() {
     };
     let json = parse_ping_json(&output);
 
-    assert!(json["sent"].as_u64().unwrap() >= 1);
-    assert_eq!(json["received"].as_u64(), Some(0));
+    assert!(json["addresses"][0]["sent"].as_u64().unwrap() >= 1);
+    assert_eq!(json["addresses"][0]["received"].as_u64(), Some(0));
 }
 
 #[tokio::test]
@@ -142,8 +142,9 @@ async fn duplicate_targets_produce_one_json_result() {
 
     assert!(json.is_object());
     assert_eq!(json["target"].as_str(), Some(url.as_str()));
-    assert_eq!(json["sent"].as_u64(), Some(1));
-    assert_eq!(json["received"].as_u64(), Some(1));
+    assert_eq!(json["addresses"].as_array().unwrap().len(), 1);
+    assert_eq!(json["addresses"][0]["sent"].as_u64(), Some(1));
+    assert_eq!(json["addresses"][0]["received"].as_u64(), Some(1));
 }
 
 #[tokio::test]
@@ -163,6 +164,7 @@ async fn count_is_applied_per_target_when_targets_exceed_probe_limit() {
 
     assert_eq!(results.len(), 70);
     assert!(results.iter().all(|result| {
-        result["sent"].as_u64() == Some(1) && result["received"].as_u64() == Some(1)
+        result["addresses"][0]["sent"].as_u64() == Some(1)
+            && result["addresses"][0]["received"].as_u64() == Some(1)
     }));
 }

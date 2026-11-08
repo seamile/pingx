@@ -36,7 +36,7 @@ pub struct Cli {
     #[arg(required_unless_present = "fetch_geo")]
     pub targets: Vec<String>,
 
-    /// Stop after sending N packets.
+    /// Send N probes to each resolved address.
     #[arg(short = 'c', overrides_with = "count", help_heading = "Ping Options")]
     pub count: Option<u64>,
 

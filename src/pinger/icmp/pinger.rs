@@ -63,7 +63,7 @@ impl Drop for ReplyRegistration {
 #[async_trait]
 impl Pinger for IcmpPinger {
     async fn probe(&self, seq: u64) -> PingResult {
-        let seq_u16 = seq as u16;
+        let wire_seq = self.client.next_sequence();
         let payload = vec![0u8; self.size];
 
         let ident_hint = self.id;
@@ -74,21 +74,21 @@ impl Pinger for IcmpPinger {
             Some(ident_hint)
         };
 
-        let rx = self.client.register(self.target, ident_key, seq_u16);
+        let rx = self.client.register(self.target, ident_key, wire_seq);
         let mut registration = ReplyRegistration {
             client: self.client.clone(),
             target: self.target,
             ident: ident_key,
-            seq: seq_u16,
+            seq: wire_seq,
             armed: true,
         };
 
-        let packet = IcmpPacket::new_request(self.target.is_ipv6(), ident_hint, seq_u16, payload);
+        let packet = IcmpPacket::new_request(self.target.is_ipv6(), ident_hint, wire_seq, payload);
         let encoded = packet.encode();
         let sock_addr = SocketAddr::new(self.target, 0);
 
         if let Err(e) = self.client.get_socket().send_to(&encoded, &sock_addr).await {
-            self.client.unregister(self.target, ident_key, seq_u16);
+            self.client.unregister(self.target, ident_key, wire_seq);
             registration.disarm();
             return PingResult {
                 target: self.target_name.clone(),

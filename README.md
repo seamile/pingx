@@ -73,7 +73,7 @@ pingx 1.1.1.1
 # IPv6
 pingx 2400:3200::1
 
-# Domain (IPv6 preferred)
+# Domain (all resolved addresses)
 pingx example.com
 ```
 
@@ -107,6 +107,8 @@ Use these flags to override automatic protocol selection:
 - `-6`: Restrict address resolution to IPv6.
 
 `-4` and `-6` can be combined with a protocol flag.
+
+ICMP, TCP, and UDP Ping probe every unique address returned by name resolution. Without `-4` or `-6`, IPv6 addresses are placed first, but both families are probed. `-4` or `-6` keeps all addresses from the requested family. `-c` applies to each address, so a domain with two addresses sends twice the requested number of probes. HTTP Ping still selects one usable address, and traceroute still targets one address.
 
 ```shell
 # Force IPv4
@@ -177,7 +179,7 @@ TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A S
 
 Each TCP probe sends one SYN and never retransmits it, so a single dropped packet shows up as `status=timeout` even when a normal `connect()` would retry and succeed. `status=open` means a SYN-ACK arrived; it does not show that the service behind the port accepted the connection or that the application is healthy. HTTPS probes skip certificate verification, so an expired, self-signed, or name-mismatched certificate produces the same result as a trusted one and cannot be told apart from the output.
 
-Ping JSON results include `target_port`, `response_counts`, `local_failures`, and `network_errors`. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state. `mdev` is the population standard deviation of RTTs, matching common ping tools.
+Ping JSON has one target record containing an `addresses` array. Each address entry includes `ip`, `response_counts`, `local_failures`, `network_errors`, and the other per-address statistics. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state. `mdev` is the population standard deviation of RTTs, matching common ping tools.
 
 ### GeoIP Lookup
 
@@ -193,7 +195,7 @@ pingx --fetch-geo
 
 ### JSON Output
 
-Export results in structured JSON format. Ping and GeoIP serialize one result as an object and multiple results as an array. Traceroute emits one object only after the target is reached.
+Export results in structured JSON format. Ping serializes one input target as an object and multiple input targets as an array, while resolved addresses are nested in each target record's `addresses` array. GeoIP serializes one result as an object and multiple results as an array. Traceroute emits one object only after the target is reached.
 
 ```shell
 # Print JSON to stdout
@@ -216,7 +218,7 @@ Traceroute JSON contains `target_name`, the resolved IP in `target`, `max_hops`,
 
 ### Common Options
 
-- `-c <COUNT>`: Stop after sending count packets.
+- `-c <COUNT>`: Stop after sending count packets to each resolved ICMP/TCP/UDP address.
 - `-i <INTERVAL>`: Wait interval seconds between sending each packet (default 1.0s).
 - `-w <DEADLINE>`: Stop running after deadline seconds.
 - `-W <TIMEOUT>`: Time to wait for a response, in seconds (default 1.0s).
@@ -232,7 +234,7 @@ Traceroute JSON contains `target_name`, the resolved IP in `target`, `max_hops`,
 - `--ts-fmt <FORMAT>`: Timestamp format used with `-D`: `unix` (default) or `iso`.
 - `--json`: Write JSON to stdout. `--json=FILE` writes it to `FILE` instead.
 
-`-D` prints `[seconds.microseconds]` by default. `-D --ts-fmt iso` prints UTC RFC 3339 `YYYY-MM-DDTHH:MM:SS.ffffffZ` with six fractional digits. The timestamp is captured when the result line or JSON summary record is prepared for output. Ping JSON records include a microsecond-precision numeric `timestamp` with `unix` or a UTC RFC 3339 string with `iso`; the field is absent without `-D`. RTT and interval timing are unchanged.
+`-D` prints `[seconds.microseconds]` by default. `-D --ts-fmt iso` prints UTC RFC 3339 `YYYY-MM-DDTHH:MM:SS.ffffffZ` with six fractional digits. The timestamp is captured when the result line or JSON summary record is prepared for output. Each Ping JSON target record includes a microsecond-precision numeric `timestamp` with `unix` or a UTC RFC 3339 string with `iso`; the field is absent without `-D`. RTT and interval timing are unchanged.
 
 ### Exit Status
 
@@ -317,7 +319,7 @@ pingx 1.1.1.1
 # IPv6
 pingx 2400:3200::1
 
-# 域名 (优先使用 IPv6)
+# 域名 (探测所有解析地址)
 pingx example.com
 ```
 
@@ -352,6 +354,8 @@ pingx 1.1.1.1:80
 - `-6`: 仅解析 IPv6 地址。
 
 `-4` 和 `-6` 可以与协议参数组合使用。
+
+ICMP、TCP 和 UDP Ping 会探测域名解析得到的全部去重地址。未指定 `-4` 或 `-6` 时，IPv6 地址排在前面，但两个地址族都会探测；指定后则保留对应地址族的全部地址。`-c` 按每个地址计数，因此解析到两个地址的域名会发送两倍于指定次数的探测。HTTP Ping 仍只选择一个可用地址，路由追踪仍只针对一个地址。
 
 ```shell
 # 检测 IPv4
@@ -420,7 +424,7 @@ TCP Ping 和 TCP 路由追踪只发送 SYN，不完成 TCP 握手。收到 SYN-A
 
 每次 TCP 探测只发送一个 SYN，后台不会重传，因此一个包丢失就会显示 `status=timeout`，而普通的 `connect()` 可能重传后成功。`status=open` 只表示收到 SYN-ACK，不能证明端口后面的服务已接受连接或应用层健康。HTTPS 探测跳过证书校验，过期、自签名或域名不匹配的证书与可信证书得到相同结果，无法从输出区分。
 
-Ping 的 JSON 结果包含 `target_port`、`response_counts`、`local_failures` 和 `network_errors`。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。`mdev` 是 RTT 的总体标准差，与常见 ping 工具一致。
+Ping 的 JSON 为每个输入目标生成一条记录，解析地址统计放在 `addresses` 数组中。每个地址项包含 `ip`、`response_counts`、`local_failures`、`network_errors` 以及其余逐地址统计。`response_counts` 会分别保留开放端口、关闭端口、UDP 应用响应、UDP Port Unreachable、ICMP 和 HTTP 等响应类型，不用一个最终状态掩盖运行期间的差异。`mdev` 是 RTT 的总体标准差，与常见 ping 工具一致。
 
 ### GeoIP 位置查询
 
@@ -436,7 +440,7 @@ pingx --fetch-geo
 
 ### JSON 格式输出
 
-将结果以结构化的 JSON 格式输出。Ping 和 GeoIP 只有一个结果时输出对象 `{...}`，有多个结果时输出列表 `[{...}, ...]`。路由追踪只在到达目标后输出一个对象。
+将结果以结构化的 JSON 格式输出。Ping 只有一个输入目标时输出对象 `{...}`，有多个输入目标时输出列表 `[{...}, ...]`，解析地址统计嵌套在每条目标的 `addresses` 数组中。GeoIP 只有一个结果时输出对象，有多个结果时输出列表。路由追踪只在到达目标后输出一个对象。
 
 ```shell
 # 打印 JSON 到屏幕
@@ -459,7 +463,7 @@ pingx -R example.com --json=route.json
 
 ### 常用参数
 
-- `-c <COUNT>`: 发送数据包的数量。
+- `-c <COUNT>`: 向每个解析到的 ICMP/TCP/UDP 地址发送指定数量的数据包。
 - `-i <INTERVAL>`: 发包间隔（秒），默认 1.0 秒。
 - `-w <DEADLINE>`: 持续运行的时间限制（秒）。
 - `-W <TIMEOUT>`: 等待响应的超时时间（秒），默认 1.0 秒。
@@ -475,7 +479,7 @@ pingx -R example.com --json=route.json
 - `--ts-fmt <FORMAT>`: 配合 `-D` 使用的时间格式，可选 `unix`（默认）或 `iso`。
 - `--json`: 将 JSON 写到标准输出；`--json=FILE` 改为写入 `FILE`。
 
-`-D` 默认输出 `[秒.微秒]`；`-D --ts-fmt iso` 输出 UTC 的 RFC 3339 时间 `YYYY-MM-DDTHH:MM:SS.ffffffZ`，固定六位小数。时间在准备输出结果行或 JSON 汇总记录时取得。Ping JSON 记录在 `unix` 下包含微秒精度的数值型 `timestamp`，在 `iso` 下包含 UTC 的 RFC 3339 时间字符串；未指定 `-D` 时没有该字段。RTT 和发包间隔不受影响。
+`-D` 默认输出 `[秒.微秒]`；`-D --ts-fmt iso` 输出 UTC 的 RFC 3339 时间 `YYYY-MM-DDTHH:MM:SS.ffffffZ`，固定六位小数。时间在准备输出结果行或 JSON 汇总记录时取得。每条 Ping JSON 目标记录在 `unix` 下包含微秒精度的数值型 `timestamp`，在 `iso` 下包含 UTC 的 RFC 3339 时间字符串；未指定 `-D` 时没有该字段。RTT 和发包间隔不受影响。
 
 ### 退出码
 
