@@ -105,7 +105,8 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 8;
+    const PROTOCOL_VERSION: u16 = 9;
+    const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -565,11 +566,19 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         let mut reader = BufReader::new(reader);
         let mut json_data = String::new();
         let mut json_line_count = 0usize;
+        let mut interrupted = false;
+        let mut interrupt_deadline = None;
         loop {
             tokio::select! {
-                signal = tokio::signal::ctrl_c() => {
+                signal = tokio::signal::ctrl_c(), if !interrupted => {
                     signal?;
-                    let _ = write_frame(&mut writer, &ClientControl::Cancel).await;
+                    write_frame(&mut writer, &ClientControl::Cancel).await?;
+                    interrupted = true;
+                    interrupt_deadline = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
+                }
+                _ = tokio::time::sleep_until(
+                    interrupt_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if interrupt_deadline.is_some() => {
                     return Ok(130);
                 }
                 response = read_frame::<Response>(&mut reader, MAX_RESPONSE) => {
@@ -613,7 +622,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                                     json_data.as_bytes(),
                                 )?;
                             }
-                            return Ok(code);
+                            return Ok(if interrupted { 130 } else { code });
                         }
                         ResponseResult::Error(error) => anyhow::bail!("{error}"),
                         ResponseResult::Status { .. } => {
@@ -1072,10 +1081,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 control = read_frame::<ClientControl>(client_reader, MAX_CONTROL), if status.is_none() => {
                     match control? {
                         Some(ClientControl::Cancel) => {
-                            terminate_child(&mut child).await;
-                            stdout_task.abort();
-                            stderr_task.abort();
-                            return Ok(Some(130));
+                            interrupt_child(&child)?;
                         }
                         None => {
                             terminate_child(&mut child).await;
@@ -1161,6 +1167,21 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             let _ = child.start_kill();
         }
         let _ = child.wait().await;
+    }
+
+    fn interrupt_child(child: &tokio::process::Child) -> Result<()> {
+        let Some(id) = child.id() else {
+            return Ok(());
+        };
+        if unsafe { libc::kill(id as libc::pid_t, libc::SIGINT) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(error).context("interrupt probe worker")
+        }
     }
 
     async fn send_request(request: Request) -> Result<Response> {
@@ -1937,6 +1958,20 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 .unwrap()
         }
 
+        fn interruptible_worker() -> tokio::process::Child {
+            tokio::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "trap 'printf \"statistics\\n\"; exit 0' INT; while :; do sleep 0.05; done",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        }
+
         #[tokio::test]
         async fn client_disconnect_terminates_the_worker() {
             let (client, server) = UnixStream::pair().unwrap();
@@ -1959,27 +1994,44 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         }
 
         #[tokio::test]
-        async fn client_cancel_terminates_the_worker() {
+        async fn client_cancel_gracefully_stops_the_worker_and_forwards_output() {
             let (client, server) = UnixStream::pair().unwrap();
-            let (reader, mut writer) = server.into_split();
-            let (_, mut client_writer) = client.into_split();
+            let (server_reader, server_writer) = server.into_split();
+            let operation = tokio::spawn(async move {
+                let mut server_reader = BufReader::new(server_reader);
+                let mut server_writer = server_writer;
+                run_operation_with_child(
+                    Operation::Ping(ping_operation()),
+                    &mut server_reader,
+                    &mut server_writer,
+                    interruptible_worker(),
+                )
+                .await
+            });
+            let (client_reader, mut client_writer) = client.into_split();
+            tokio::time::sleep(Duration::from_millis(100)).await;
             write_frame(&mut client_writer, &ClientControl::Cancel)
                 .await
                 .unwrap();
-            let mut client_reader = BufReader::new(reader);
-            let result = tokio::time::timeout(
-                Duration::from_secs(2),
-                run_operation_with_child(
-                    Operation::Ping(ping_operation()),
-                    &mut client_reader,
-                    &mut writer,
-                    sleeping_worker(),
-                ),
-            )
-            .await
-            .expect("cancel should stop the worker promptly")
-            .unwrap();
-            assert_eq!(result, Some(130));
+            let result = tokio::time::timeout(Duration::from_secs(3), operation)
+                .await
+                .expect("cancel should stop the worker after printing statistics")
+                .unwrap()
+                .unwrap();
+            assert_eq!(result, Some(0));
+
+            let mut client_reader = BufReader::new(client_reader);
+            let output = read_frame::<Response>(&mut client_reader, MAX_RESPONSE)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                output.result,
+                ResponseResult::Output {
+                    stream: OutputStream::Stdout,
+                    data
+                } if data == "statistics"
+            ));
         }
 
         #[test]
