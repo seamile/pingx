@@ -599,15 +599,16 @@ impl Session {
                     }
                 }
                 let country = geo.as_ref().and_then(|g| g.country_code(stats._address));
-                tables.push((target_host.to_string(), country, table));
+                tables.push((target_host.to_string(), country, stats._address, table));
             }
         }
 
         // Print all tables with global widths
-        for (target, country, table) in tables {
+        for (target, country, address, table) in tables {
             Self::render_table(
                 &target,
                 country.as_deref(),
+                address,
                 &table,
                 &global_key_widths,
                 &global_val_widths,
@@ -819,41 +820,33 @@ impl Session {
         }
     }
 
-    fn styled_label(target: &str, country: Option<&str>) -> String {
-        match country {
+    fn styled_label(target: &str, country: Option<&str>, address: std::net::IpAddr) -> String {
+        let label = match country {
             Some(code) => format!("[{}] {}", code, target),
             None => target.to_string(),
+        };
+        let is_domain =
+            crate::probe::TargetSpec::parse(target, crate::probe::ProtocolMode::Auto, false)
+                .is_ok_and(|spec| spec.host.parse::<std::net::IpAddr>().is_err());
+        if is_domain {
+            format!("{label} ({address})")
+        } else {
+            label
         }
     }
 
     fn render_table(
         target: &str,
         country: Option<&str>,
+        address: std::net::IpAddr,
         table: &TableData,
         k_widths: &[usize; 3],
         v_widths: &[usize; 3],
     ) {
         let sep = " | ";
-        let label = Self::styled_label(target, country);
+        let label = Self::styled_label(target, country, address);
 
-        // Calculate total width for centering title
-        // Each column is k_width + 1 (space) + v_width
-        let col_widths: Vec<usize> = (0..3).map(|i| k_widths[i] + 1 + v_widths[i]).collect();
-        let total_width = col_widths.iter().sum::<usize>() + (sep.len() * 2);
-
-        let title_clean = format!("=== {} ping statistics ===", label);
-        let padding = if total_width > title_clean.len() {
-            (total_width - title_clean.len()) / 2
-        } else {
-            0
-        };
-
-        println!(
-            "\n{:padding$}{}",
-            "",
-            format!("=== {} ping statistics ===", label.as_str().bold()).blue(),
-            padding = padding
-        );
+        println!("\n{}", format!("{} ping statistics", label.bold()).blue());
 
         for (r_idx, row) in table.rows.iter().enumerate() {
             let is_last_row = r_idx == 2;
@@ -962,13 +955,28 @@ fn json_timestamp_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Duration;
 
     #[test]
-    fn report_title_prefixes_country_code() {
-        assert_eq!(Session::styled_label("1.1.1.1", Some("US")), "[US] 1.1.1.1");
-        assert_eq!(Session::styled_label("223.5.5.5", None), "223.5.5.5");
+    fn report_title_prefixes_country_code_and_domain_address() {
+        let address = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(
+            Session::styled_label("1.1.1.1", Some("US"), address),
+            "[US] 1.1.1.1"
+        );
+        assert_eq!(
+            Session::styled_label("one.one.one.one", Some("US"), address),
+            "[US] one.one.one.one (1.1.1.1)"
+        );
+        assert_eq!(
+            Session::styled_label("example.com:443", None, address),
+            "example.com:443 (1.1.1.1)"
+        );
+        assert_eq!(
+            Session::styled_label("[::1]:443", None, IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            "[::1]:443"
+        );
     }
 
     #[test]

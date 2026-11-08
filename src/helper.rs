@@ -105,7 +105,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 7;
+    const PROTOCOL_VERSION: u16 = 8;
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
     const MAX_CONTROL: usize = 4 * 1024;
@@ -183,6 +183,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         udp: bool,
         json: bool,
         json_file: bool,
+        #[serde(default)]
+        color: bool,
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -284,6 +286,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             udp: cli.udp,
             json: cli.json.is_some(),
             json_file: cli.json.as_ref().is_some_and(Option::is_some),
+            color: colored::control::SHOULD_COLORIZE.should_colorize(),
         })))
     }
 
@@ -631,6 +634,9 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         anyhow::ensure!(data.len() <= MAX_REQUEST, "helper request is too large");
         let operation: Operation = serde_json::from_slice(&data)?;
         validate_operation(&operation)?;
+        if let Operation::Ping(PingOperation { color, .. }) = &operation {
+            colored::control::set_override(*color);
+        }
         let json_only = matches!(
             &operation,
             Operation::Ping(PingOperation {
@@ -1557,6 +1563,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 udp: false,
                 json: true,
                 json_file: true,
+                color: true,
             }
         }
 
