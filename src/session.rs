@@ -377,7 +377,10 @@ impl Session {
                     };
 
                     let first_pinger = pingers.len();
+                    #[cfg(unix)]
                     let mut target_error: Option<anyhow::Error> = None;
+                    #[cfg(not(unix))]
+                    let target_error: Option<anyhow::Error> = None;
 
                     for target_addr in probe_addrs {
                         // Initialize the shared ICMP client for this address family.
