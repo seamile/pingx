@@ -5,7 +5,6 @@ edition = "2024"
 authors     = ["Seamile <lanhuermao@gmail.com>"]
 license     = "MIT"
 description = "A network diagnostic CLI for concurrent ICMP, half-open TCP, UDP, HTTP, and traceroute probes."
-homepage    = "https://github.com/seamile/pingx"
 repository  = "https://github.com/seamile/pingx"
 keywords    = ["ping", "tcp-ping", "udp-ping", "traceroute", "network"]
 categories  = ["command-line-utilities"]
