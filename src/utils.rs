@@ -766,6 +766,7 @@ mod tests {
             ttl: 64,
             size: Some(56),
             quiet: false,
+            sort: false,
             timestamp: false,
             timestamp_format: None,
             ipv4: false,

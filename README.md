@@ -147,7 +147,7 @@ pingx 1.1.1.1 www.github.com
 
 Use `-R` to trace the route to one IPv4, IPv6, or domain target. `-s` sets the total IP packet size:
 
-Traceroute requires exactly one target and cannot be combined with `-H`, `-g`, or `--fetch-geo`. The Ping-only options `-c`, `-i`, `-w`, `-t`, `-q`, and `--header` are accepted but do not affect traceroute.
+Traceroute requires exactly one target and cannot be combined with `-H`, `-g`, or `--fetch-geo`. The Ping-only options `-c`, `-i`, `-w`, `-t`, `-q`, `-S`, and `--header` are accepted but do not affect traceroute.
 
 ```shell
 pingx -R 1.1.1.1
@@ -180,6 +180,8 @@ TCP Ping and TCP traceroute send a SYN without completing the TCP handshake. A S
 Each TCP probe sends one SYN and never retransmits it, so a single dropped packet shows up as `status=timeout` even when a normal `connect()` would retry and succeed. `status=open` means a SYN-ACK arrived; it does not show that the service behind the port accepted the connection or that the application is healthy. HTTPS probes skip certificate verification, so an expired, self-signed, or name-mismatched certificate produces the same result as a trusted one and cannot be told apart from the output.
 
 Ping JSON has one target record containing an `addresses` array. Each address entry includes `ip`, `response_counts`, `local_failures`, `network_errors`, and the other per-address statistics. `response_counts` keeps open, closed, UDP reply, UDP Port Unreachable, ICMP, and HTTP outcomes separate instead of collapsing them into one final state. `mdev` is the population standard deviation of RTTs, matching common ping tools.
+
+With `-S` or `--sort`, final statistics are ordered by `loss`, then `avg`, then `mdev`, all ascending. Addresses with no successful RTT are compared last for `avg` and `mdev`. JSON keeps one record per target and sorts its `addresses` array; multiple target records follow the rank of their best address. Results with equal metrics keep their original order. The option affects only Ping; traceroute and GeoIP accept it but ignore it.
 
 ### GeoIP Lookup
 
@@ -230,6 +232,7 @@ Traceroute JSON contains `target_name`, the resolved IP in `target`, `max_hops`,
 - `HOST:PORT`: TCP target port, or UDP port when `-U` is set; use `[IPv6]:PORT` for IPv6.
 - `-I <IFACE>`: Bind DNS, probes, HTTP, and GeoIP downloads to a Unix network interface (e.g., `en0`, `eth0`, `utun1`); unavailable on Windows.
 - `-q`: Suppress per-probe output but keep the startup header and final statistics.
+- `-S` / `--sort`: Sort final Ping results by `loss`, then `avg`, then `mdev`, all ascending.
 - `-D`: Prefix each Ping probe result with its print time, like Linux `ping -D`.
 - `--ts-fmt <FORMAT>`: Timestamp format used with `-D`: `unix` (default) or `iso`.
 - `--json`: Write JSON to stdout. `--json=FILE` writes it to `FILE` instead.
@@ -475,11 +478,14 @@ pingx -R example.com --json=route.json
 - `HOST:PORT`：TCP 目标端口，或配合 `-U` 设置 UDP 端口；IPv6 使用 `[IPv6]:PORT`。
 - `-I <IFACE>`: 将 DNS、探测、HTTP 和 GeoIP 下载绑定到指定 Unix 网卡接口（如 `en0`、`eth0`、`utun1`）；Windows 不可用。
 - `-q`: 安静模式，不显示逐个包的结果，但仍显示启动标题和最终统计。
+- `-S` / `--sort`: 按 `loss`、`avg`、`mdev` 的优先级升序排列 Ping 最终结果。
 - `-D`: 在每条 Ping 探测结果前显示输出时间，行为对应 Linux `ping -D`。
 - `--ts-fmt <FORMAT>`: 配合 `-D` 使用的时间格式，可选 `unix`（默认）或 `iso`。
 - `--json`: 将 JSON 写到标准输出；`--json=FILE` 改为写入 `FILE`。
 
 `-D` 默认输出 `[秒.微秒]`；`-D --ts-fmt iso` 输出 UTC 的 RFC 3339 时间 `YYYY-MM-DDTHH:MM:SS.ffffffZ`，固定六位小数。时间在准备输出结果行或 JSON 汇总记录时取得。每条 Ping JSON 目标记录在 `unix` 下包含微秒精度的数值型 `timestamp`，在 `iso` 下包含 UTC 的 RFC 3339 时间字符串；未指定 `-D` 时没有该字段。RTT 和发包间隔不受影响。
+
+使用 `-S` 或 `--sort` 时，最终统计按 `loss`、`avg`、`mdev` 的优先级依次升序排列。没有成功 RTT 的地址在 `avg` 和 `mdev` 比较时排在最后。JSON 保留每个目标的一条记录，并排序其 `addresses` 数组；多个目标按各自最佳地址的排名排序。指标完全相同时保持原有顺序。该参数只影响 Ping；路由追踪和 GeoIP 接受参数但不生效。
 
 ### 退出码
 

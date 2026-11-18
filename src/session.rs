@@ -207,12 +207,16 @@ pub enum JsonTimestamp {
     Iso(String),
 }
 
-fn json_address_result(stats: &models::PingStats) -> JsonAddressResult {
-    let loss = if stats.transmitted > 0 {
+fn loss_percent(stats: &models::PingStats) -> f64 {
+    if stats.transmitted > 0 {
         100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
     } else {
         0.0
-    };
+    }
+}
+
+fn json_address_result(stats: &models::PingStats) -> JsonAddressResult {
+    let loss = loss_percent(stats);
     let total_time = stats.start_time.elapsed().as_secs_f64() * 1000.0;
     let (min, max, avg, mdev, jitter) = stats
         .rtt_metrics()
@@ -550,16 +554,18 @@ impl Session {
             }
         }
 
+        let address_order = address_order(&stats, self.cli.sort);
+
         // JSON Output Logic
         if let Some(json_arg) = &self.cli.json {
             let mut json_results = Vec::new();
+            let json_targets = ordered_targets(&pingers, &address_order);
 
-            for &target_host in &targets {
-                let addresses = pingers
+            for target_host in json_targets {
+                let addresses = address_order
                     .iter()
-                    .enumerate()
-                    .filter(|(_, pinger)| pinger.target == target_host)
-                    .map(|(index, _)| json_address_result(&stats[index]))
+                    .filter(|&&index| pingers[index].target == target_host)
+                    .map(|&index| json_address_result(&stats[index]))
                     .collect::<Vec<_>>();
                 if addresses.is_empty() {
                     continue;
@@ -601,7 +607,8 @@ impl Session {
         let mut global_key_widths = [0usize; 3];
         let mut global_val_widths = [0usize; 3];
 
-        for (index, pinger) in pingers.iter().enumerate() {
+        for &index in &address_order {
+            let pinger = &pingers[index];
             let stats = &stats[index];
             let table = Self::prepare_table_data(stats);
             for r in 0..3 {
@@ -764,11 +771,7 @@ impl Session {
     }
 
     fn prepare_table_data(stats: &models::PingStats) -> TableData {
-        let loss = if stats.transmitted > 0 {
-            100.0 * (1.0 - stats.received as f64 / stats.transmitted as f64)
-        } else {
-            0.0
-        };
+        let loss = loss_percent(stats);
 
         let total_time = stats.start_time.elapsed().as_millis();
 
@@ -917,6 +920,41 @@ fn unique_targets(targets: &[String]) -> Vec<&str> {
         .map(String::as_str)
         .filter(|target| seen.insert(*target))
         .collect()
+}
+
+fn address_order(stats: &[models::PingStats], sort: bool) -> Vec<usize> {
+    let mut order = (0..stats.len()).collect::<Vec<_>>();
+    if sort {
+        order.sort_by(|&a, &b| {
+            let (loss_a, avg_a, mdev_a) = sort_metrics(&stats[a]);
+            let (loss_b, avg_b, mdev_b) = sort_metrics(&stats[b]);
+            loss_a
+                .total_cmp(&loss_b)
+                .then_with(|| avg_a.total_cmp(&avg_b))
+                .then_with(|| mdev_a.total_cmp(&mdev_b))
+        });
+    }
+    order
+}
+
+fn ordered_targets<'a>(pingers: &'a [ScheduledPinger], order: &[usize]) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    order
+        .iter()
+        .filter_map(|&index| {
+            let target = pingers[index].target.as_str();
+            seen.insert(target).then_some(target)
+        })
+        .collect()
+}
+
+fn sort_metrics(stats: &models::PingStats) -> (f64, f64, f64) {
+    let (avg, mdev) = stats
+        .rtt_metrics()
+        .map_or((f64::INFINITY, f64::INFINITY), |(_, _, avg, mdev, _)| {
+            (avg, mdev)
+        });
+    (loss_percent(stats), avg, mdev)
 }
 
 async fn addresses_to_probe(
@@ -1380,6 +1418,87 @@ mod tests {
         assert_eq!(unique_addresses(vec![v6, v4, v6, v4]), [v6, v4]);
     }
 
+    fn stats_with_rtts(address: &str, sent: u64, rtts: &[u64]) -> models::PingStats {
+        stats_with_rtt_durations(
+            address,
+            sent,
+            rtts.iter().map(|&rtt| Duration::from_millis(rtt)),
+        )
+    }
+
+    fn stats_with_rtt_durations(
+        address: &str,
+        sent: u64,
+        rtts: impl IntoIterator<Item = Duration>,
+    ) -> models::PingStats {
+        let address: IpAddr = address.parse().unwrap();
+        let mut stats = models::PingStats::new(address.to_string(), address);
+        let mut received = 0;
+        for (seq, rtt) in (1..).zip(rtts) {
+            received += 1;
+            stats.record_sent(seq);
+            stats.update(&models::PingResult {
+                target: address.to_string(),
+                target_addr: address,
+                seq,
+                bytes: 56,
+                ttl: Some(64),
+                rtt,
+                status: models::ProbeStatus::Success(models::ResponseType::IcmpEchoReply),
+            });
+        }
+        for seq in received + 1..=sent {
+            stats.record_sent(seq);
+        }
+        stats
+    }
+
+    #[test]
+    fn address_order_uses_loss_then_avg_then_mdev() {
+        let stats = vec![
+            stats_with_rtts("192.0.2.1", 2, &[5]),
+            stats_with_rtts("192.0.2.2", 2, &[10, 20]),
+            stats_with_rtts("192.0.2.3", 1, &[20]),
+            stats_with_rtts("192.0.2.4", 1, &[10]),
+            stats_with_rtts("192.0.2.5", 2, &[9, 11]),
+        ];
+
+        assert_eq!(address_order(&stats, false), [0, 1, 2, 3, 4]);
+        assert_eq!(address_order(&stats, true), [4, 3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn address_order_is_stable_and_uses_unrounded_metrics() {
+        let stats = vec![
+            stats_with_rtts("192.0.2.1", 1, &[1]),
+            stats_with_rtts("192.0.2.2", 1, &[1]),
+            stats_with_rtts("192.0.2.3", 1, &[0]),
+        ];
+
+        assert_eq!(address_order(&stats, true), [2, 0, 1]);
+    }
+
+    #[test]
+    fn address_order_compares_metrics_before_output_rounding() {
+        let stats = vec![
+            stats_with_rtt_durations("192.0.2.1", 1, [Duration::from_nanos(1_000_400)]),
+            stats_with_rtt_durations("192.0.2.2", 1, [Duration::from_nanos(1_000_100)]),
+        ];
+
+        assert_eq!(address_order(&stats, true), [1, 0]);
+    }
+
+    #[test]
+    fn address_order_uses_loss_then_places_missing_rtt_last() {
+        let stats = vec![
+            stats_with_rtts("192.0.2.1", 1, &[]),
+            stats_with_rtts("192.0.2.2", 1, &[0]),
+            models::PingStats::new("192.0.2.3".to_string(), "192.0.2.3".parse().unwrap()),
+        ];
+
+        assert_eq!(address_order(&stats, true), [1, 2, 0]);
+    }
+
     #[tokio::test]
     async fn non_http_ping_keeps_all_resolved_addresses() {
         let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
@@ -1421,6 +1540,45 @@ mod tests {
             serde_json::from_str(&serialize_json_results(&results, true)).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 1);
         assert_eq!(value[0]["addresses"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_target_order_follows_the_first_address_in_sorted_order() {
+        let stats = vec![
+            stats_with_rtts("192.0.2.1", 1, &[20]),
+            stats_with_rtts("192.0.2.2", 1, &[10]),
+            stats_with_rtts("192.0.2.3", 1, &[30]),
+        ];
+        let pingers =
+            ["slow.example", "fast.example", "slow.example"].map(|target| ScheduledPinger {
+                target: target.to_string(),
+                pinger: Arc::new(TestPinger),
+            });
+        let order = address_order(&stats, true);
+        let targets = ordered_targets(&pingers, &order);
+        let addresses = order
+            .iter()
+            .filter(|&&index| pingers[index].target == "slow.example")
+            .map(|&index| stats[index]._address)
+            .collect::<Vec<_>>();
+
+        assert_eq!(targets, ["fast.example", "slow.example"]);
+        assert_eq!(
+            addresses,
+            [
+                "192.0.2.1".parse::<IpAddr>().unwrap(),
+                "192.0.2.3".parse::<IpAddr>().unwrap()
+            ]
+        );
+    }
+
+    struct TestPinger;
+
+    #[async_trait::async_trait]
+    impl Pinger for TestPinger {
+        async fn probe(&self, _seq: u64) -> PingResult {
+            unreachable!()
+        }
     }
 
     #[test]

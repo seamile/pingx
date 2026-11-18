@@ -80,6 +80,10 @@ pub struct Cli {
     #[arg(short = 'q', help_heading = "Ping Options")]
     pub quiet: bool,
 
+    /// Sort final results by loss, average RTT, then mean deviation, ascending.
+    #[arg(short = 'S', long = "sort", help_heading = "Ping Options")]
+    pub sort: bool,
+
     /// Prefix each probe result with its print time.
     #[arg(short = 'D', help_heading = "Ping Options")]
     pub timestamp: bool,
@@ -269,6 +273,19 @@ mod tests {
         assert!(cli.traceroute);
         assert!(cli.ipv4);
         assert_eq!(cli.max_hops, 8);
+    }
+
+    #[test]
+    fn sort_accepts_short_and_long_flags() {
+        assert!(!parse(&["example.com"]).unwrap().sort);
+        assert!(parse(&["-S", "example.com"]).unwrap().sort);
+        assert!(parse(&["--sort", "example.com"]).unwrap().sort);
+        assert!(parse(&["-S", "-q", "--json", "example.com"]).unwrap().sort);
+        assert!(
+            parse(&["--sort", "--json=result.json", "example.com"])
+                .unwrap()
+                .sort
+        );
     }
 
     #[test]

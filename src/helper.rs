@@ -105,7 +105,7 @@ mod macos {
     const STATE_DIR: &str = "/Library/Application Support/PingX";
     const STATE_PATH: &str = "/Library/Application Support/PingX/helper.json";
     const SOCKET_PATH: &str = "/var/run/pingx-helper.sock";
-    const PROTOCOL_VERSION: u16 = 9;
+    const PROTOCOL_VERSION: u16 = 10;
     const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
     const MAX_REQUEST: usize = 1024 * 1024;
     const MAX_RESPONSE: usize = 4 * 1024 * 1024;
@@ -174,6 +174,8 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         ttl: u32,
         size: usize,
         quiet: bool,
+        #[serde(default)]
+        sort: bool,
         timestamp: bool,
         #[serde(default)]
         timestamp_format: Option<crate::cli::TimestampFormat>,
@@ -278,6 +280,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
             ttl: cli.ttl,
             size: cli.ping_size(),
             quiet: cli.quiet,
+            sort: cli.sort,
             timestamp: cli.timestamp,
             timestamp_format: cli.timestamp_format,
             interface: cli.interface.clone(),
@@ -413,6 +416,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: self.ttl,
                 size: Some(self.size),
                 quiet: self.quiet,
+                sort: self.sort,
                 timestamp: self.timestamp,
                 timestamp_format: self.timestamp_format,
                 interface: self.interface.clone(),
@@ -443,6 +447,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: self.size,
                 quiet: false,
+                sort: false,
                 timestamp: false,
                 timestamp_format: None,
                 interface: self.interface.clone(),
@@ -1575,6 +1580,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: 56,
                 quiet: false,
+                sort: false,
                 timestamp: false,
                 timestamp_format: None,
                 interface: None,
@@ -1614,6 +1620,7 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
                 ttl: 64,
                 size: Some(56),
                 quiet: false,
+                sort: false,
                 timestamp: false,
                 timestamp_format: None,
                 interface: None,
@@ -1925,6 +1932,19 @@ trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
         fn worker_json_output_cannot_choose_a_file_path() {
             let cli = ping_operation().to_cli();
             assert_eq!(cli.json, Some(None));
+        }
+
+        #[test]
+        fn helper_request_preserves_sort_option() {
+            let mut cli = cli_with_targets(&["127.0.0.1:1"]);
+            cli.tcp = true;
+            cli.sort = true;
+
+            let Operation::Ping(ping) = operation_from_cli(&cli).unwrap().unwrap() else {
+                panic!("expected ping operation")
+            };
+            assert!(ping.sort);
+            assert!(ping.to_cli().sort);
         }
 
         #[test]

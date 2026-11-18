@@ -19,6 +19,7 @@ Ping Options:
   -D                        Prefix each probe result with its print time
       --ts-fmt <FORMAT>     Timestamp format for -D: unix or iso [default: unix]
   -q                        Show only startup information and final statistics
+  -S, --sort                Sort final results by loss, avg, then mdev
   -H, --http                Use HTTP probes
       --header <HEADER>     Add an HTTP header; may be repeated
   -T, --tcp                 Use TCP SYN probes [default port: 80]
@@ -59,7 +60,7 @@ Notes:
   • ICMP/TCP/UDP Ping probes all resolved addresses; HTTP selects one address.
   • -T, -U, and -H are mutually exclusive; so are -4 and -6.
   • --ts-fmt requires -D: unix uses [seconds.microseconds], iso uses UTC RFC 3339.
-  • Traceroute rejects HTTP/GeoIP modes and ignores -c, -i, -w, -t, -q, and --header.
+  • Traceroute rejects HTTP/GeoIP modes and ignores -c, -i, -w, -t, -q, -S, and --header.
     JSON is emitted only after the target is reached.
   • Closed TCP ports and UDP port-unreachable replies count as received responses.
   • TCP Ping ignores -s; TCP traceroute requires 40 bytes (IPv4) or 60 (IPv6).
