@@ -611,12 +611,12 @@ impl Session {
             let pinger = &pingers[index];
             let stats = &stats[index];
             let table = Self::prepare_table_data(stats);
-            for r in 0..3 {
-                for c in 0..3 {
-                    global_key_widths[c] =
-                        std::cmp::max(global_key_widths[c], table.rows[r][c].key.len());
-                    global_val_widths[c] =
-                        std::cmp::max(global_val_widths[c], table.rows[r][c].val.len());
+            for row in &table.rows {
+                for (column, cell) in row.iter().enumerate() {
+                    global_key_widths[column] =
+                        std::cmp::max(global_key_widths[column], cell.key.len());
+                    global_val_widths[column] =
+                        std::cmp::max(global_val_widths[column], cell.val.len());
                 }
             }
             let country = geo.as_ref().and_then(|g| g.country_code(stats._address));
